@@ -264,7 +264,7 @@ static void run_init_sequence(void)
 
     /* ── 5c. OTA updater ─────────────────────────────────────────────── */
     _init_row("OTA Updater  (HTTP + RSA-2048)",
-              (esp_err_t)0, true);
+              ota_http_init(), false);
 
     /* ── 6. Wi-Fi stack ───────────────────────────────────────────────── */
     _init_row("Wi-Fi Subsystem  (802.11bgn promiscuous)",

@@ -2,11 +2,35 @@
  * ============================================================================
  *  ota_http.c  —  HTTP firmware update with RSA-2048 / SHA-256 signature check
  *
- *  Chosen implementation (see header comment block for rejected alternatives):
- *   1. Download raw firmware over plain HTTP.
- *   2. Verify the PKCS#1 v1.5 signature against an embedded DER-encoded public key.
- *   3. Write verified bytes into the inactive OTA partition.
- *   4. Mark the new partition bootable and reboot.
+ *  DECISION BLOCK — ToT Branch Selection
+ *  -------------------------------------
+ *  Requirement: HTTP-based OTA with signed firmware verification.
+ *
+ *  Branch A — Unverified HTTP OTA (esp_https_ota without auth)
+ *    Pros: trivial API, HTTPS built-in.
+ *    Cons: NO signature verification. Any MITM can push malicious firmware.
+ *    Decision: REJECTED. Fails security requirement.
+ *
+ *  Branch B — eFuse-burned RSA public key
+ *    Pros: strongest anti-rollback, unmodifiable key.
+ *    Cons: irreversible hardware provisioning; user reflashes often during
+ *          development. eFuse block can brick the chip if misused.
+ *    Decision: REJECTED. Too brittle for dev/reflash workflow.
+ *
+ *  Branch C — HTTP fetch + mbedtls RSA-2048 verify + OTA write
+ *    Pros: meets signed verification requirement, no eFuse, no TLS overhead,
+ *          public key stored in NVS so it can be updated/recovered.
+ *    Cons: uses plain HTTP for download; security relies solely on signature,
+ *          so key secrecy matters more than transport secrecy.
+ *    Decision: ACCEPTED. Best fit for dev + production without TLS infra.
+ *
+ *  Chosen implementation flow:
+ *    1. Download raw firmware bytes over HTTP.
+ *    2. Fetch companion .sig file (URL + ".sig") containing RSA-2048 PKCS#1v1.5.
+ *    3. Compute SHA-256 over firmware.
+ *    4. Verify using mbedtls pk/md stack + embedded DER public key.
+ *    5. Write verified payload into inactive OTA partition.
+ *    6. Mark bootable and reboot.
  *
  *  This satisfies the requirement for signed verification without requiring
  *  eFuse provisioning or TLS stack overhead.
@@ -63,12 +87,14 @@ static esp_err_t verify_signature(const uint8_t *fw, size_t fw_len,
     if (ret != 0) {
         ESP_LOGE(TAG, "public key parse failed: -0x%04x", -ret);
         mbedtls_pk_free(&pk);
+        mbedtls_sha256_free(&sha);
         return ESP_ERR_INVALID_STATE;
     }
 
     if (!mbedtls_pk_can_do(&pk, MBEDTLS_PK_RSA)) {
         ESP_LOGE(TAG, "key is not RSA");
         mbedtls_pk_free(&pk);
+        mbedtls_sha256_free(&sha);
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -277,4 +303,13 @@ bool ota_http_in_progress(void)
 int ota_http_progress(void)
 {
     return atomic_load(&g_ota_progress);
+}
+
+/*============================================================================*/
+esp_err_t ota_http_init(void)
+{
+    atomic_store(&g_ota_running, false);
+    atomic_store(&g_ota_progress, -1);
+    ESP_LOGI(TAG, "OTA HTTP module ready");
+    return ESP_OK;
 }

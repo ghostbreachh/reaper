@@ -22,7 +22,7 @@ typedef enum {
     OTA_ERR_NO_SLOT = -7,
 } ota_status_t;
 
-/* Start an HTTP-based OTA update. */
+esp_err_t ota_http_init(void);
 ota_status_t ota_http_start(const char *url, const uint8_t *pubkey_der, size_t pubkey_len);
 
 /* Abort in-progress OTA. */
