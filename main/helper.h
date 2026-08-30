@@ -17,5 +17,7 @@
 #include "extra_offense.h"
 #include "port_detect.h"
 #include "jsonrpc.h"
+#include "cli_transport.h"
+#include "nvs_persist.h"
 
 #endif // HELPER_H
