@@ -22,5 +22,6 @@
 #include "storage_spiffs.h"
 #include "ota_http.h"
 #include "watchdog.h"
+#include "structured_log.h"
 
 #endif // HELPER_H
