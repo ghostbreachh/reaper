@@ -160,6 +160,7 @@ void arp_relay_frame(const uint8_t *data, size_t len)
 
 static void arp_poison_task(void *arg)
 {
+    watchdog_task_refresh("arp_task");
     int64_t last = 0;
 
     while (atomic_load(&g_arp_poison_active)) {

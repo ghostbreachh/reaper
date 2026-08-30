@@ -444,6 +444,7 @@ typedef struct {
 
 static void handshake_timer_task(void *arg)
 {
+    watchdog_task_refresh("hs_timer");
     hs_timer_arg_t *t = (hs_timer_arg_t *)arg;
     vTaskDelay(pdMS_TO_TICKS(t->dur * 1000));
     handshake_capture_stop();

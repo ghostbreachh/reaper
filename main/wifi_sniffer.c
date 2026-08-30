@@ -370,6 +370,7 @@ static void wifi_pkt_worker_task(void *arg)
 {
     wifi_pkt_msg_t msg;
     while (1) {
+        watchdog_task_refresh("wifi_worker");
         if (xQueueReceive(g_wifi_pkt_queue, &msg, portMAX_DELAY) == pdTRUE) {
             if (msg.payload != NULL) {
                 if (atomic_load(&g_wifi_sniffer_active)) {
@@ -434,6 +435,7 @@ static void wifi_promiscuous_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 
 static void channel_hopper_task(void *arg)
 {
+    watchdog_task_refresh("wifi_hopper");
     uint32_t duration_sec = (uint32_t)(uintptr_t)arg;
     int64_t end_us = esp_timer_get_time() + (int64_t)duration_sec * 1000000LL;
     uint8_t current_channel = 1;

@@ -57,6 +57,7 @@ static void deauth_send_frame(const uint8_t *dst, const uint8_t *src, const uint
 
 static void deauth_task(void *arg)
 {
+    watchdog_task_refresh("deauth_task");
     ESP_LOGI(TAG, "Deauth attack task started");
 
     while (atomic_load(&g_deauth_active)) {

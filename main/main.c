@@ -266,6 +266,10 @@ static void run_init_sequence(void)
     _init_row("OTA Updater  (HTTP + RSA-2048)",
               ota_http_init(), false);
 
+    /* ── 5d. Watchdog + Panic Handler ───────────────────────────────── */
+    _init_row("Watchdog + Panic Handler",
+              watchdog_init(), false);
+
     /* ── 6. Wi-Fi stack ───────────────────────────────────────────────── */
     _init_row("Wi-Fi Subsystem  (802.11bgn promiscuous)",
               wifi_sniffer_init(), false);

@@ -279,6 +279,7 @@ static void cli_command_loop(void)
     char line[CLI_LINE_MAX];
 
     while (1) {
+        watchdog_task_refresh("cli_task");
         const cli_transport_t *t = cli_transport_get();
         if (!t || !t->connected()) {
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -302,6 +303,7 @@ static void cli_command_loop(void)
  * ----------------------------------------------------------------------- */
 static void cli_task(void *arg)
 {
+    watchdog_task_refresh("cli_task");
     (void)arg;
     cli_command_loop();
 }

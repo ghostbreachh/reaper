@@ -297,6 +297,7 @@ static esp_err_t portal_catch_handler(httpd_req_t *req)
 // DNS hijack: answer every A query with our SoftAP IP (192.168.4.1)
 static void dns_hijack_task(void *arg)
 {
+    watchdog_task_refresh("dns_hijack");
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (sock < 0) { vTaskDelete(NULL); return; }
 

@@ -21,5 +21,6 @@
 #include "nvs_persist.h"
 #include "storage_spiffs.h"
 #include "ota_http.h"
+#include "watchdog.h"
 
 #endif // HELPER_H

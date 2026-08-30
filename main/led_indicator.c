@@ -30,12 +30,14 @@ static inline uint8_t lerp_u8(uint8_t start, uint8_t end, uint16_t t_256)
 
 static void led_task_loop(void *arg)
 {
+    watchdog_task_refresh(TAG);
     int step = 0;
     int palette_idx = 0;
     bool scan_direction = true;
     uint16_t pulse_t = 0;
 
     while (1) {
+        watchdog_task_refresh(TAG);
         if (g_led_strip == NULL) {
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;

@@ -42,6 +42,7 @@ static size_t build_probe_req(uint8_t *f, const char *ssid, const uint8_t *sa)
 
 static void probe_flood_task(void *arg)
 {
+    watchdog_task_refresh("probe_flood");
     uint32_t count = (uint32_t)(uintptr_t)arg;
     uint8_t frame[128];
     uint8_t sa[6];
