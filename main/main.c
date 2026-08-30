@@ -231,6 +231,10 @@ static void run_init_sequence(void)
     boot_port_detect(&port);
     port_print_banner(&port);
 
+    /* ── 3b. NVS persistence ─────────────────────────────────────────── */
+    _init_row("NVS Persistence  (settings/targets)",
+              nvs_persist_init(), true);
+
     /* Choose console path:
      * - If CDC-ACM is active, this device is being controlled by a phone;
      *   keep UART0 quiet and let the JSON-RPC dispatcher handle I/O.
@@ -253,6 +257,10 @@ static void run_init_sequence(void)
     /* ── 5. SD card (optional — device works fine without it) ─────────── */
     _init_row("SD Card Storage  (SPI2, /sd)",
               storage_init(), true);
+
+    /* ── 5b. SPIFFS storage (wordlists, blobs) ───────────────────────── */
+    _init_row("SPIFFS Wordlist Store  (5 MiB)",
+              storage_spiffs_init(), true);
 
     /* ── 6. Wi-Fi stack ───────────────────────────────────────────────── */
     _init_row("Wi-Fi Subsystem  (802.11bgn promiscuous)",

@@ -19,5 +19,6 @@
 #include "jsonrpc.h"
 #include "cli_transport.h"
 #include "nvs_persist.h"
+#include "storage_spiffs.h"
 
 #endif // HELPER_H

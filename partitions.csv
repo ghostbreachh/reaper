@@ -1,5 +1,21 @@
+# REAPER partition table — 16 MB flash, factory + dual-OTA + SPIFFS + NVS
+#
+# Layout rationale:
+#  - factory  : 3 MiB — primary firmware image
+#  - ota_0    : 3 MiB — OTA slot 0
+#  - ota_1    : 3 MiB — OTA slot 1
+#  - storage  : 2 MiB FAT — PCAP/log export
+#  - spiffs   : 5 MiB — wordlists and persistent blob storage
+#  - nvs      : 64 KiB  — settings/targets
+#  - phy_init : 4 KiB   — PHY calibration data
+#
+# Total: 0x1000000 = exactly 16 MiB
+#
 # Name,    Type, SubType, Offset,   Size,     Flags
-nvs,       data, nvs,     0x9000,   0x10000,
-phy_init,  data, phy,     0x19000,  0x1000,
-factory,   app,  factory, 0x20000,  0x400000,
-storage,   data, fat,     0x420000, 0xBE0000,
+nvs,      data, nvs,    0x9000,   0x10000,
+phy_init, data, phy,    0x19000,  0x1000,
+factory,  app,  factory,0x20000,  0x300000,
+ota_0,    app,  ota_0,  0x320000, 0x300000,
+ota_1,    app,  ota_1,  0x620000, 0x300000,
+storage,  data, fat,    0x920000, 0x200000,
+spiffs,   data, spiffs, 0xB20000, 0x4E0000,
