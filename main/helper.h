@@ -17,6 +17,7 @@
 #include "extra_offense.h"
 #include "port_detect.h"
 #include "jsonrpc.h"
+#include "jsonrpc_schema.h"
 #include "cli_transport.h"
 #include "nvs_persist.h"
 #include "storage_spiffs.h"
