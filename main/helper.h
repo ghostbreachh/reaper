@@ -1,0 +1,20 @@
+#ifndef HELPER_H
+#define HELPER_H
+
+#include "wifi_tx_fix.h"
+#include "common_types.h"
+#include "led_indicator.h"
+#include "wifi_sniffer.h"
+#include "ble_scanner.h"
+#include "storage_sd.h"
+#include "deauth_engine.h"
+#include "handshake_crack.h"
+#include "arp_poison.h"
+#include "pcap_ring.h"
+#include "cli_module.h"
+#include "cred_sniffer.h"
+#include "beacon_spam.h"
+#include "extra_offense.h"
+
+
+#endif // HELPER_H
