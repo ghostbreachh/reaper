@@ -29,6 +29,9 @@
 
 static const char *TAG = "port_detect";
 
+/* Global boot-time detection result, populated once at startup. */
+port_detect_result_t g_boot_port;
+
 /* -------------------------------------------------------------------------
  *  Low-level: probe USB-Serial-JTAG controller enable state
  *

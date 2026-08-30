@@ -363,8 +363,11 @@ esp_err_t jsonrpc_init(jsonrpc_dispatch_t *dispatch,
                        uint16_t method_count,
                        void *user_ctx)
 {
-    if (dispatch == NULL || method_table == NULL || method_count == 0)
-        return ESP_ERR_INVALID_ARG;
+    if (dispatch == NULL) return ESP_ERR_INVALID_ARG;
+    /* method_table may be NULL / method_count may be 0 when modules have
+     * not yet registered RPC handlers. The dispatcher still starts; it
+     * will simply return "Method not found" for any call until handlers
+     * are added. */
 
     memset(dispatch, 0, sizeof(*dispatch));
     dispatch->methods = method_table;

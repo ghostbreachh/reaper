@@ -278,9 +278,16 @@ static void run_init_sequence(void)
     _init_row("PCAP Ring Buffer  (2 MiB PSRAM)",
               pcap_ring_init(RING_BYTES), false);
 
-    /* ── 12. Interactive serial CLI ────────────────────────────────────── */
-    _init_row("Interactive Serial CLI  (UART0 / CDC fallback)",
-              cli_start(), false);
+    /* ── 12. Interactive serial CLI / JSON-RPC ────────────────────────── */
+    if (port.active == PORT_TRANSPORT_CDC) {
+        _init_row("JSON-RPC 2.0 Dispatcher  (USB-OTG CDC-ACM)",
+                  jsonrpc_init(NULL, NULL, 0, NULL), false);
+        printf("  " CYN "│" R0 "\n");
+        printf("  " CYN "│" R0 "  " GRY "UART0 CLI suppressed on CDC transport" R0 "\n");
+    } else {
+        _init_row("Interactive Serial CLI  (UART0 / COM)",
+                  cli_start(), false);
+    }
 
     printf("  " CYN "│" R0 "\n");
 
