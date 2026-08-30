@@ -274,6 +274,10 @@ static void run_init_sequence(void)
     _init_row("Structured Logging  (ring + JSON)",
               structured_log_init(), false);
 
+    /* ── 5f. USB CDC-ACM custom VID/PID ──────────────────────────────── */
+    _init_row("USB CDC-ACM Custom VID/PID",
+              usb_cdc_init(), false);
+
     _init_row("Health Telemetry  (heap/PSRAM/temp/uptime)",
               health_telemetry_init(), false);
 

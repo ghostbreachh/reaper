@@ -24,5 +24,6 @@
 #include "watchdog.h"
 #include "structured_log.h"
 #include "health_telemetry.h"
+#include "usb_cdc.h"
 
 #endif // HELPER_H
