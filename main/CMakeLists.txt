@@ -15,6 +15,8 @@ idf_component_register(SRCS "main.c"
                        "jsonrpc.c"
                        "cli_transport.c"
                        "nvs_persist.c"
+                       "storage_spiffs.c"
+                       "ota_http.c"
                        INCLUDE_DIRS "."
                        REQUIRES led_strip freertos esp_wifi nvs_flash spi_flash spiffs fatfs sdmmc mbedtls json app_update esp_ota_ops esp_event esp_netif esp_driver_spi esp_driver_uart esp_driver_gpio esp_http_server lwip)
           

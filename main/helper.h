@@ -20,5 +20,6 @@
 #include "cli_transport.h"
 #include "nvs_persist.h"
 #include "storage_spiffs.h"
+#include "ota_http.h"
 
 #endif // HELPER_H
