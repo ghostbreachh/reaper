@@ -120,6 +120,30 @@ typedef struct {
 //  SECTION 4: BOOT PORT DETECTION
 // ============================================================================
 
+// Transport modes chosen at boot based on detected USB port.
+typedef enum {
+    PORT_TRANSPORT_UART0 = 0,   // USB-Serial-JTAG / COM port console
+    PORT_TRANSPORT_CDC,         // USB-OTG CDC-ACM active
+    PORT_TRANSPORT_UNKNOWN,     // No recognised transport found
+    PORT_TRANSPORT_BOTH         // Rare: both PHYs reported (UART0 preferred)
+} port_transport_t;
+
+// Detailed detection result for diagnostics and phone-app handshake.
+typedef struct {
+    port_transport_t active;
+    bool usb_serial_jtag_present;  // USB-Serial-JTAG enum found
+    bool cdc_acm_present;          // TinyUSB CDC ACM interface found
+    bool both_active;              // both USB funcs simultaneously detected
+    char jtag_serial[32];          // iSerial if available, else empty
+    char cdc_iface[16];            // e.g. "ttyACM0" hint for debug
+    uint8_t reason;                // why a transport was chosen
+} port_detect_result_t;
+
+#define PORT_REASON_JTAG_ONLY   0x01
+#define PORT_REASON_CDC_ONLY    0x02
+#define PORT_REASON_BOTH        0x03
+#define PORT_REASON_FALLBACK    0x04
+
 typedef enum {
     PORT_TRANSPORT_UART0 = 0,
     PORT_TRANSPORT_CDC,

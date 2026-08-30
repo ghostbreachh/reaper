@@ -16,6 +16,6 @@
 #include "beacon_spam.h"
 #include "extra_offense.h"
 #include "port_detect.h"
-
+#include "jsonrpc.h"
 
 #endif // HELPER_H
