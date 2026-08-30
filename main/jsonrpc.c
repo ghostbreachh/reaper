@@ -21,6 +21,7 @@
  */
 
 #include "jsonrpc.h"
+#include "usb_cdc.h"
 #include "port_detect.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -37,15 +38,6 @@
 static const char *TAG = "jsonrpc";
 
 /* -------------------------------------------------------------------------
- *  CDC line coding state
- * ----------------------------------------------------------------------- */
-static SemaphoreHandle_t g_cdc_line_sem = NULL;
-static uint32_t g_cdc_baud = 115200;
-static uint8_t  g_cdc_databits = 8;
-static uint8_t  g_cdc_parity = 0;
-static uint8_t  g_cdc_stopbits = 1;
-
-/* -------------------------------------------------------------------------
  *  TinyUSB callbacks
  * ----------------------------------------------------------------------- */
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
@@ -59,16 +51,14 @@ void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding)
     (void)itf;
     if (coding == NULL) return;
 
-    g_cdc_baud = coding->bit_rate;
-    g_cdc_databits = coding->data_bits;
-    g_cdc_parity = coding->parity;
-    g_cdc_stopbits = coding->stop_bits;
-
-    ESP_LOGI(TAG,
-             "line coding: baud=%" PRIu32 " data=%u parity=%u stop=%u",
-             g_cdc_baud, g_cdc_databits, g_cdc_parity, g_cdc_stopbits);
-
-    if (g_cdc_line_sem) xSemaphoreGive(g_cdc_line_sem);
+    /* Route to centralized usb_cdc module (moved from jsonrpc-local globals). */
+    usb_cdc_line_coding_t lc = {
+        .bit_rate   = coding->bit_rate,
+        .data_bits  = coding->data_bits,
+        .parity     = coding->parity,
+        .stop_bits  = coding->stop_bits,
+    };
+    usb_cdc_set_line_coding(&lc);
 }
 
 void tud_cdc_rx_wanted_cb(uint8_t itf, void *wanted)
@@ -376,7 +366,7 @@ esp_err_t jsonrpc_init(jsonrpc_dispatch_t *dispatch,
     dispatch->user_ctx = user_ctx;
     dispatch->running = true;
 
-    g_cdc_line_sem = xSemaphoreCreateBinary();
+    /* line_coding semaphore moved to usb_cdc module */
 
     ESP_LOGI(TAG, "initialised with %" PRIu16 " methods", method_count);
 
@@ -390,7 +380,7 @@ esp_err_t jsonrpc_init(jsonrpc_dispatch_t *dispatch,
         1);
     if (r != pdPASS) {
         ESP_LOGE(TAG, "task creation failed");
-        if (g_cdc_line_sem) { vSemaphoreDelete(g_cdc_line_sem); g_cdc_line_sem = NULL; }
+
         return ESP_FAIL;
     }
 
