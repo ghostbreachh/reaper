@@ -22,6 +22,8 @@
 
 #include "jsonrpc.h"
 #include "usb_cdc.h"
+#include "driver/usb_serial_jtag.h"
+#include "esp_system.h"
 #include "port_detect.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -40,10 +42,17 @@ static const char *TAG = "jsonrpc";
 /* -------------------------------------------------------------------------
  *  TinyUSB callbacks
  * ----------------------------------------------------------------------- */
+/* Track DTR falling edge to detect terminal break/Ctrl-C. */
+static bool g_dtr_prev = false;
+
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
 {
-    (void)itf; (void)dtr; (void)rts;
-    // DTR/RTS could indicate terminal app readiness; currently unused.
+    (void)itf; (void)rts;
+    if (g_dtr_prev && !dtr) {
+        /* DTR falling edge: terminal sent break or disconnected. */
+        usb_cdc_break_signal();
+    }
+    g_dtr_prev = dtr;
 }
 
 void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding)

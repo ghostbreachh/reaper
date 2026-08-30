@@ -10,10 +10,10 @@ extern "C" {
 
 /* Line coding struct (mirrors TinyUSB cdc_line_coding_t). */
 typedef struct {
-    uint32_t bit_rate;      /* baud rate */
-    uint8_t  data_bits;     /* usually 8 */
-    uint8_t  parity;        /* 0=none, 1=odd, 2=even, 3=mark, 4=space */
-    uint8_t  stop_bits;     /* 0=1, 1=1.5, 2=2 */
+    uint32_t bit_rate;
+    uint8_t  data_bits;
+    uint8_t  parity;
+    uint8_t  stop_bits;
 } usb_cdc_line_coding_t;
 
 esp_err_t usb_cdc_init(void);
@@ -29,6 +29,12 @@ const char *usb_cdc_serial_string(void);
 esp_err_t usb_cdc_set_line_coding(const usb_cdc_line_coding_t *coding);
 esp_err_t usb_cdc_get_line_coding(usb_cdc_line_coding_t *out);
 esp_err_t usb_cdc_line_coding_to_json(char *buf, size_t bufsz);
+
+/* Break/interrupt signal: monitors DTR transitions.
+ * Call usb_cdc_poll_break() from long-running task loops.
+ * Returns true if a break (Ctrl-C equivalent) was detected since last call. */
+bool usb_cdc_break_signaled(void);
+void usb_cdc_break_clear(void);
 
 #ifdef __cplusplus
 }

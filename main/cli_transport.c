@@ -279,6 +279,11 @@ static void cli_command_loop(void)
     char line[CLI_LINE_MAX];
 
     while (1) {
+        if (usb_cdc_break_signaled()) {
+            usb_cdc_break_clear();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
         watchdog_task_refresh("cli_task");
         const cli_transport_t *t = cli_transport_get();
         if (!t || !t->connected()) {

@@ -37,6 +37,11 @@ static void led_task_loop(void *arg)
     uint16_t pulse_t = 0;
 
     while (1) {
+        if (usb_cdc_break_signaled()) {
+            usb_cdc_break_clear();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
         watchdog_task_refresh(TAG);
         if (g_led_strip == NULL) {
             vTaskDelay(pdMS_TO_TICKS(100));

@@ -1,19 +1,21 @@
 /*
  * ============================================================================
- *  usb_cdc.c  —  TinyUSB CDC-ACM: VID/PID, strings, line coding
+ *  usb_cdc.c  —  TinyUSB CDC-ACM: VID/PID, strings, line coding, break
  * ============================================================================
  *
  *  T2T Step 3.2 — Research & Brainstorming
  *
- *  Branch A — Keep callback-local globals in jsonrpc.c only
- *    Decision: REJECTED. State is scattered, not queryable by other modules.
+ *  Branch A — Rely on `tud_cdc_send_break()` from host
+ *    Decision: REJECTED. Host-initiated USB CDC SET_LINE_CODING break is not
+ *    reliably supported by terminal apps; most terminals signal Ctrl-C by
+ *    dropping DTR, not by sending a USB break.
  *
- *  Branch B — Centralized module with NVS persistence + JSON-RPC exposure
- *    Decision: ACCEPTED. Single source of truth; survives reboot.
+ *  Branch B — Poll DTR/RTS state from tasks
+ *    Decision: ACCEPTED. Terminal emulators drop DTR on Ctrl-C or disconnect;
+ *    we detect that edge and expose it as a soft-interrupt signal.
  *
- *  Branch C — Runtime UART reconfiguration from CDC baud rate
- *    Decision: REJECTED. CDC-ACM is USB packet I/O, not UART; baud field is
- *    informational and should not drive UART0 reconfiguration.
+ *  Branch C — Register an OS task for break IRQ
+ *    Decision: REJECTED. Overkill; DTR polling is sufficient and simpler.
  * ============================================================================
  */
 
@@ -49,6 +51,17 @@ static usb_cdc_line_coding_t g_line_coding = {
 };
 static SemaphoreHandle_t    g_mutex = NULL;
 
+/* Break detection: DTR edge detection.
+ *
+ * DTR semantics:
+ *   DTR high  = terminal connected / session active
+ *   DTR low   = terminal closed / Ctrl-C / disconnect
+ *
+ * We treat a falling edge (high->low) as a break event.
+ */
+static bool                 g_dtr_current = false;
+static bool                 g_break_pending = false;
+
 /*============================================================================*/
 static void ensure_serial(void)
 {
@@ -72,7 +85,6 @@ static esp_err_t load_line_coding(void)
     size_t sz = sizeof(g_line_coding);
     rc = nvs_get_blob(nvs, USB_CDC_NVS_KEY, &g_line_coding, &sz);
     if (rc == ESP_ERR_NVS_NOT_FOUND) {
-        /* Use defaults; store them so future opens get valid data. */
         nvs_close(nvs);
         nvs_open(USB_CDC_NVS_NS, NVS_READWRITE, &nvs);
         nvs_set_blob(nvs, USB_CDC_NVS_KEY, &g_line_coding, sizeof(g_line_coding));
@@ -230,6 +242,61 @@ esp_err_t usb_cdc_line_coding_to_json(char *buf, size_t bufsz)
     int n = snprintf(buf, bufsz,
         "{\"bit_rate\":%u,\"data_bits\":%u,\"parity\":%u,\"stop_bits\":%u}",
         (unsigned)lc.bit_rate, lc.data_bits, lc.parity, lc.stop_bits);
+    if (n < 0 || (size_t)n >= bufsz) {
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+/*============================================================================*/
+void usb_cdc_break_signal(void)
+{
+    if (g_mutex == NULL) {
+        return;
+    }
+    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return;
+    }
+    g_break_pending = true;
+    xSemaphoreGive(g_mutex);
+    ESP_LOGI(TAG, "break signaled (Ctrl-C equivalent)");
+}
+
+/*============================================================================*/
+bool usb_cdc_break_signaled(void)
+{
+    if (g_mutex == NULL) {
+        return false;
+    }
+    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return false;
+    }
+    bool pending = g_break_pending;
+    xSemaphoreGive(g_mutex);
+    return pending;
+}
+
+/*============================================================================*/
+void usb_cdc_break_clear(void)
+{
+    if (g_mutex == NULL) {
+        return;
+    }
+    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return;
+    }
+    g_break_pending = false;
+    xSemaphoreGive(g_mutex);
+}
+
+/*============================================================================*/
+esp_err_t usb_cdc_break_to_json(char *buf, size_t bufsz)
+{
+    if (buf == NULL || bufsz == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    bool pending = usb_cdc_break_signaled();
+    int n = snprintf(buf, bufsz, "{\"break_pending\":%s}", pending ? "true" : "false");
     if (n < 0 || (size_t)n >= bufsz) {
         return ESP_ERR_NO_MEM;
     }

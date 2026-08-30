@@ -370,6 +370,11 @@ static void wifi_pkt_worker_task(void *arg)
 {
     wifi_pkt_msg_t msg;
     while (1) {
+        if (usb_cdc_break_signaled()) {
+            usb_cdc_break_clear();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
         watchdog_task_refresh("wifi_worker");
         if (xQueueReceive(g_wifi_pkt_queue, &msg, portMAX_DELAY) == pdTRUE) {
             if (msg.payload != NULL) {
