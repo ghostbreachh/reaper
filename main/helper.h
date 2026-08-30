@@ -23,5 +23,6 @@
 #include "ota_http.h"
 #include "watchdog.h"
 #include "structured_log.h"
+#include "health_telemetry.h"
 
 #endif // HELPER_H

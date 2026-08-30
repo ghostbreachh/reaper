@@ -274,6 +274,9 @@ static void run_init_sequence(void)
     _init_row("Structured Logging  (ring + JSON)",
               structured_log_init(), false);
 
+    _init_row("Health Telemetry  (heap/PSRAM/temp/uptime)",
+              health_telemetry_init(), false);
+
     /* ── 6. Wi-Fi stack ───────────────────────────────────────────────── */
     _init_row("Wi-Fi Subsystem  (802.11bgn promiscuous)",
               wifi_sniffer_init(), false);
