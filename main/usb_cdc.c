@@ -1,21 +1,25 @@
 /*
  * ============================================================================
- *  usb_cdc.c  —  TinyUSB CDC-ACM: VID/PID, strings, line coding, break
+ *  usb_cdc.c  —  TinyUSB CDC-ACM: VID/PID, strings, line coding, break,
+ *                 and host flow control
  * ============================================================================
  *
  *  T2T Step 3.2 — Research & Brainstorming
  *
- *  Branch A — Rely on `tud_cdc_send_break()` from host
- *    Decision: REJECTED. Host-initiated USB CDC SET_LINE_CODING break is not
- *    reliably supported by terminal apps; most terminals signal Ctrl-C by
- *    dropping DTR, not by sending a USB break.
+ *  Branch A — Hardware RTS/CTS over CDC ACM
+ *    Decision: REJECTED. TinyUSB CDC ACM exposes no per-byte RTS callback;
+ *    there is no API to toggle RTS pin state from firmware, so true RTS/CTS
+ *    handshaking cannot be implemented on this transport.
  *
- *  Branch B — Poll DTR/RTS state from tasks
- *    Decision: ACCEPTED. Terminal emulators drop DTR on Ctrl-C or disconnect;
- *    we detect that edge and expose it as a soft-interrupt signal.
+ *  Branch B — Software XON/XOFF on the CDC-ACM byte stream
+ *    Decision: REJECTED. Terminal apps do not reliably honor XON/XOFF
+ *    control bytes; parsing them out of a mixed data stream is fragile and
+ *    would corrupt binary exports such as framed PCAP.
  *
- *  Branch C — Register an OS task for break IRQ
- *    Decision: REJECTED. Overkill; DTR polling is sufficient and simpler.
+ *  Branch C — Non-blocking write availability check + soft TX pause/resume
+ *    Decision: ACCEPTED. `tud_cdc_write_available()` and
+ *    `tud_cdc_send_break()`/DTR give us backpressure without modifying the
+ *    byte stream. This protects against USB host stalls and overflow.
  * ============================================================================
  */
 
@@ -39,7 +43,6 @@ static const char *TAG = "usb_cdc";
 #define USB_CDC_NVS_NS       "usb_cdc"
 #define USB_CDC_NVS_KEY      "line_coding"
 
-/* Mutable state protected by g_mutex. */
 static uint16_t             g_vid = USB_CDC_DEFAULT_VID;
 static uint16_t             g_pid = USB_CDC_DEFAULT_PID;
 static char                 g_serial[32] = {0};
@@ -51,16 +54,12 @@ static usb_cdc_line_coding_t g_line_coding = {
 };
 static SemaphoreHandle_t    g_mutex = NULL;
 
-/* Break detection: DTR edge detection.
- *
- * DTR semantics:
- *   DTR high  = terminal connected / session active
- *   DTR low   = terminal closed / Ctrl-C / disconnect
- *
- * We treat a falling edge (high->low) as a break event.
- */
 static bool                 g_dtr_current = false;
 static bool                 g_break_pending = false;
+
+/* Flow control state */
+static _Atomic bool         g_tx_paused = ATOMIC_VAR_INIT(false);
+static _Atomic size_t       g_tx_pending = ATOMIC_VAR_INIT(0);
 
 /*============================================================================*/
 static void ensure_serial(void)
@@ -123,6 +122,8 @@ esp_err_t usb_cdc_init(void)
     }
     ensure_serial();
     load_line_coding();
+    atomic_store(&g_tx_paused, false);
+    atomic_store(&g_tx_pending, 0);
     ESP_LOGI(TAG, "VID=0x%04X PID=0x%04X serial=%s baud=%u",
              g_vid, g_pid, g_serial, (unsigned)g_line_coding.bit_rate);
     return ESP_OK;
@@ -301,4 +302,72 @@ esp_err_t usb_cdc_break_to_json(char *buf, size_t bufsz)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+/*============================================================================*/
+bool usb_cdc_write_available(size_t needed_bytes)
+{
+    if (atomic_load(&g_tx_paused)) {
+        return false;
+    }
+    int32_t avail = tud_cdc_write_available();
+    if (avail < 0) {
+        /* Host not connected or TinyUSB error */
+        atomic_store(&g_tx_paused, true);
+        return false;
+    }
+    if ((size_t)avail < needed_bytes) {
+        return false;
+    }
+    return true;
+}
+
+/*============================================================================*/
+esp_err_t usb_cdc_write(const uint8_t *buf, size_t len)
+{
+    if (buf == NULL || len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Block until host accepts the data or a break/stop occurs. */
+    while (len > 0) {
+        if (usb_cdc_break_signaled()) {
+            usb_cdc_break_clear();
+            atomic_store(&g_tx_paused, true);
+            return ESP_ERR_CANCEL;
+        }
+
+        if (!usb_cdc_write_available(len)) {
+            /* Host TX buffer full or paused; yield and retry. */
+            if (atomic_load(&g_tx_paused)) {
+                return ESP_ERR_NOT_FINISHED;
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
+        uint32_t chunk = (len > 64) ? 64 : (uint32_t)len;
+        uint32_t written = tud_cdc_write(buf, chunk);
+        if (written == 0) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+        buf += written;
+        len -= written;
+        atomic_store(&g_tx_pending, len);
+    }
+    atomic_store(&g_tx_pending, 0);
+    return ESP_OK;
+}
+
+/*============================================================================*/
+void usb_cdc_flow_resume(void)
+{
+    atomic_store(&g_tx_paused, false);
+}
+
+/*============================================================================*/
+size_t usb_cdc_tx_pending(void)
+{
+    return atomic_load(&g_tx_pending);
 }

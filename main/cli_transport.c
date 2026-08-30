@@ -23,6 +23,7 @@
  */
 
 #include "cli_transport.h"
+#include "usb_cdc.h"
 #include "cli_module.h"
 #include "port_detect.h"
 #include "esp_log.h"
@@ -209,9 +210,14 @@ static int cdc_read_line(char *buf, size_t cap, uint32_t timeout_ms)
 
 static int cdc_write(const void *data, size_t len)
 {
-    tud_cdc_write(data, len);
-    tud_cdc_write_flush();
-    return (int)len;
+    esp_err_t rc = usb_cdc_write((const uint8_t *)data, len);
+    if (rc == ESP_OK) {
+        return (int)len;
+    }
+    if (rc == ESP_ERR_CANCEL) {
+        usb_cdc_break_clear();
+    }
+    return -1;
 }
 
 static int cdc_printf(const char *fmt, ...)

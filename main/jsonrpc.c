@@ -79,12 +79,11 @@ void tud_cdc_rx_wanted_cb(uint8_t itf, void *wanted)
 /* -------------------------------------------------------------------------
  *  Helpers
  * ----------------------------------------------------------------------- */
-static void jsonrpc_write_str(const char *s)
+static esp_err_t jsonrpc_write_str(const char *s)
 {
-    if (s == NULL) return;
+    if (s == NULL) return ESP_ERR_INVALID_ARG;
     size_t len = strlen(s);
-    tud_cdc_write(s, len);
-    tud_cdc_write_flush();
+    return usb_cdc_write((const uint8_t *)s, len);
 }
 
 static bool jsonrpc_read_line(char *buf, size_t cap, uint32_t timeout_ms)

@@ -8,7 +8,6 @@
 extern "C" {
 #endif
 
-/* Line coding struct (mirrors TinyUSB cdc_line_coding_t). */
 typedef struct {
     uint32_t bit_rate;
     uint8_t  data_bits;
@@ -25,16 +24,17 @@ const char *usb_cdc_manufacturer_string(void);
 const char *usb_cdc_product_string(void);
 const char *usb_cdc_serial_string(void);
 
-/* Line coding API */
 esp_err_t usb_cdc_set_line_coding(const usb_cdc_line_coding_t *coding);
 esp_err_t usb_cdc_get_line_coding(usb_cdc_line_coding_t *out);
 esp_err_t usb_cdc_line_coding_to_json(char *buf, size_t bufsz);
 
-/* Break/interrupt signal: monitors DTR transitions.
- * Call usb_cdc_poll_break() from long-running task loops.
- * Returns true if a break (Ctrl-C equivalent) was detected since last call. */
 bool usb_cdc_break_signaled(void);
 void usb_cdc_break_clear(void);
+esp_err_t usb_cdc_break_to_json(char *buf, size_t bufsz);
+
+/* Flow control: non-blocking write with availability check. */
+bool usb_cdc_write_available(size_t needed_bytes);
+esp_err_t usb_cdc_write(const uint8_t *buf, size_t len);
 
 #ifdef __cplusplus
 }
