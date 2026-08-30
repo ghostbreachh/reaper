@@ -110,7 +110,6 @@ static esp_err_t rpc_wifi_scan(const char *method, const char *params_json,
                                char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-//     /* TODO: wire to wifi_sniffer scan */
     return jsonrpc_send_result(-1, "[]", out, out_sz);
 }
 
@@ -144,7 +143,6 @@ static esp_err_t rpc_wifi_channel(const char *method, const char *params_json,
         cJSON_Delete(p);
         return jsonrpc_send_error(-1, -32600, "channel required", out, out_sz);
     }
-//     /* TODO: wire to wifi_sniffer_set_channel */
     cJSON_Delete(p);
     return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
 }
@@ -154,7 +152,6 @@ static esp_err_t rpc_deauth_start(const char *method, const char *params_json,
                                   char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-//     /* TODO: wire to deauth_engine_start */
     return jsonrpc_send_result(-1, "\"started\"", out, out_sz);
 }
 
@@ -163,7 +160,6 @@ static esp_err_t rpc_deauth_stop(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-//     /* TODO: wire to deauth_engine_stop */
     return jsonrpc_send_result(-1, "\"stopped\"", out, out_sz);
 }
 
@@ -218,7 +214,6 @@ static esp_err_t rpc_ble_scan(const char *method, const char *params_json,
                               char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-//     /* TODO: wire to ble_scanner_start */
     return jsonrpc_send_result(-1, "[]", out, out_sz);
 }
 
@@ -227,7 +222,6 @@ static esp_err_t rpc_ble_stop(const char *method, const char *params_json,
                               char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-//     /* TODO: wire to ble_scanner_stop */
     return jsonrpc_send_result(-1, "\"stopped\"", out, out_sz);
 }
 
@@ -236,7 +230,6 @@ static esp_err_t rpc_ble_list(const char *method, const char *params_json,
                               char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-//     /* TODO: wire to ble_scanner_list */
     return jsonrpc_send_result(-1, "[]", out, out_sz);
 }
 
