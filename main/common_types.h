@@ -117,7 +117,33 @@ typedef struct {
 } ble_info_t;
 
 // ============================================================================
-//  SECTION 6: DEAUTH TYPES
+//  SECTION 4: BOOT PORT DETECTION
+// ============================================================================
+
+typedef enum {
+    PORT_TRANSPORT_UART0 = 0,
+    PORT_TRANSPORT_CDC,
+    PORT_TRANSPORT_UNKNOWN,
+    PORT_TRANSPORT_BOTH
+} port_transport_t;
+
+typedef struct {
+    port_transport_t active;
+    bool usb_serial_jtag_present;
+    bool cdc_acm_present;
+    bool both_active;
+    char jtag_serial[32];
+    char cdc_iface[16];
+    uint8_t reason;
+} port_detect_result_t;
+
+#define PORT_REASON_JTAG_ONLY   0x01
+#define PORT_REASON_CDC_ONLY    0x02
+#define PORT_REASON_BOTH        0x03
+#define PORT_REASON_FALLBACK    0x04
+
+// ============================================================================
+//  SECTION 5: DEAUTH TYPES
 // ============================================================================
 
 #define MAX_TARGET_APS    10
@@ -139,7 +165,7 @@ typedef struct {
 } deauth_target_t;
 
 // ============================================================================
-//  SECTION 7: WPA HANDSHAKE TYPES
+//  SECTION 6: WPA HANDSHAKE TYPES
 // ============================================================================
 
 #define EAPOL_BUF_SIZE 256
@@ -160,7 +186,7 @@ typedef struct {
 } handshake_t;
 
 // ============================================================================
-//  SECTION 8: ARP POISON TYPES
+//  SECTION 7: ARP POISON TYPES
 // ============================================================================
 
 #define MAX_ARP_TABLE 32
@@ -174,7 +200,7 @@ typedef struct {
 } arp_host_t;
 
 // ============================================================================
-//  SECTION 10: CREDENTIAL / PLAINTEXT SNIFFER
+//  SECTION 8: CREDENTIAL / PLAINTEXT SNIFFER
 // ============================================================================
 
 #define MAX_CREDS 32

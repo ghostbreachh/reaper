@@ -11,6 +11,7 @@ idf_component_register(SRCS "main.c"
                        "cred_sniffer.c"
                        "beacon_spam.c"
                        "extra_offense.c"
+                       "port_detect.c"
                        INCLUDE_DIRS "."
                        REQUIRES led_strip freertos esp_wifi nvs_flash spi_flash esp_event esp_netif bt esp_driver_spi esp_driver_uart esp_driver_gpio esp_http_server lwip fatfs sdmmc mbedtls)
           

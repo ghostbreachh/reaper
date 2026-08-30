@@ -226,7 +226,22 @@ static void run_init_sequence(void)
 {
     _section("Module Initialisation");
 
-    /* ── 1. LED indicator ─────────────────────────────────────────────── */
+    /* ── 3. USB transport detection ───────────────────────────────────── */
+    port_detect_result_t port = {0};
+    boot_port_detect(&port);
+    port_print_banner(&port);
+
+    /* Choose console path:
+     * - If CDC-ACM is active, this device is being controlled by a phone;
+     *   keep UART0 quiet and let the JSON-RPC dispatcher handle I/O.
+     * - Otherwise use the traditional UART0 CLI.
+     */
+    if (port.active == PORT_TRANSPORT_CDC) {
+        printf("  │  Active path is USB-OTG CDC-ACM. ");
+        printf("Use the companion app for control.\n");
+    }
+
+    /* ── 4. LED indicator ─────────────────────────────────────────────── */
     _init_row("LED Indicator (WS2812, GPIO 48)",
               helper_init(), false);
 
@@ -235,36 +250,36 @@ static void run_init_sequence(void)
     vTaskDelay(pdMS_TO_TICKS(120));
     led_set_state(LED_STATE_SCANNING);
 
-    /* ── 2. SD card (optional — device works fine without it) ─────────── */
+    /* ── 5. SD card (optional — device works fine without it) ─────────── */
     _init_row("SD Card Storage  (SPI2, /sd)",
               storage_init(), true);
 
-    /* ── 3. Wi-Fi stack ───────────────────────────────────────────────── */
+    /* ── 6. Wi-Fi stack ───────────────────────────────────────────────── */
     _init_row("Wi-Fi Subsystem  (802.11bgn promiscuous)",
               wifi_sniffer_init(), false);
 
-    /* ── 4. BLE stack ─────────────────────────────────────────────────── */
+    /* ── 7. BLE stack ─────────────────────────────────────────────────── */
     _init_row("BLE 5.0 Scanner  (NimBLE host)",
               ble_scanner_init(), false);
 
-    /* ── 5. ARP poison engine ─────────────────────────────────────────── */
+    /* ── 8. ARP poison engine ─────────────────────────────────────────── */
     _init_row("ARP Poison Engine  (MITM + relay)",
               arp_poison_init(), false);
 
-    /* ── 6. Credential sniffer ────────────────────────────────────────── */
+    /* ── 9. Credential sniffer ────────────────────────────────────────── */
     _init_row("HTTP Credential Sniffer  (form/cookie/Basic)",
               creds_init(), false);
 
-    /* ── 7. WPA handshake capture ─────────────────────────────────────── */
+    /* ── 10. WPA handshake capture ─────────────────────────────────────── */
     _init_row("WPA-2 Handshake Capture + Crack  (EAPOL)",
               handshake_init(), false);
 
-    /* ── 8. PCAP ring buffer in PSRAM ─────────────────────────────────── */
+    /* ── 11. PCAP ring buffer in PSRAM ─────────────────────────────────── */
     _init_row("PCAP Ring Buffer  (2 MiB PSRAM)",
               pcap_ring_init(RING_BYTES), false);
 
-    /* ── 9. Interactive serial CLI ────────────────────────────────────── */
-    _init_row("Interactive Serial CLI  (USB-OTG CDC)",
+    /* ── 12. Interactive serial CLI ────────────────────────────────────── */
+    _init_row("Interactive Serial CLI  (UART0 / CDC fallback)",
               cli_start(), false);
 
     printf("  " CYN "│" R0 "\n");

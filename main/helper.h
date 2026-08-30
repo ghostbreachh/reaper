@@ -15,6 +15,7 @@
 #include "cred_sniffer.h"
 #include "beacon_spam.h"
 #include "extra_offense.h"
+#include "port_detect.h"
 
 
 #endif // HELPER_H
