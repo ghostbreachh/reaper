@@ -1,25 +1,23 @@
 /*
  * ============================================================================
  *  usb_cdc.c  —  TinyUSB CDC-ACM: VID/PID, strings, line coding, break,
- *                 and host flow control
+ *                 flow control, and capability detection on connect
  * ============================================================================
  *
  *  T2T Step 3.2 — Research & Brainstorming
  *
- *  Branch A — Hardware RTS/CTS over CDC ACM
- *    Decision: REJECTED. TinyUSB CDC ACM exposes no per-byte RTS callback;
- *    there is no API to toggle RTS pin state from firmware, so true RTS/CTS
- *    handshaking cannot be implemented on this transport.
+ *  Branch A — Capability snapshot only at init time
+ *    Decision: REJECTED. Capabilities can change at runtime (DTR/RTS toggle,
+ *    VID/PID update via CLI, TX buffer availability).
  *
- *  Branch B — Software XON/XOFF on the CDC-ACM byte stream
- *    Decision: REJECTED. Terminal apps do not reliably honor XON/XOFF
- *    control bytes; parsing them out of a mixed data stream is fragile and
- *    would corrupt binary exports such as framed PCAP.
+ *  Branch B — On-demand snapshot API + JSON-RPC exposure
+ *    Decision: ACCEPTED. Companion app queries this immediately after USB
+ *    connect to learn device identity, line coding, and flow state.
  *
- *  Branch C — Non-blocking write availability check + soft TX pause/resume
- *    Decision: ACCEPTED. `tud_cdc_write_available()` and
- *    `tud_cdc_send_break()`/DTR give us backpressure without modifying the
- *    byte stream. This protects against USB host stalls and overflow.
+ *  Branch C — Automatic notification on connect/disconnect
+ *    Decision: REJECTED. The companion app detects USB connect via OS APIs;
+ *    we do not push unsolicited JSON-RPC over CDC because the transport may
+ *    not be ready immediately after enum.
  * ============================================================================
  */
 
@@ -54,7 +52,8 @@ static usb_cdc_line_coding_t g_line_coding = {
 };
 static SemaphoreHandle_t    g_mutex = NULL;
 
-static bool                 g_dtr_current = false;
+static _Atomic bool         g_dtr_current = ATOMIC_VAR_INIT(false);
+static _Atomic bool         g_rts_current = ATOMIC_VAR_INIT(false);
 static bool                 g_break_pending = false;
 
 /* Flow control state */
@@ -312,7 +311,6 @@ bool usb_cdc_write_available(size_t needed_bytes)
     }
     int32_t avail = tud_cdc_write_available();
     if (avail < 0) {
-        /* Host not connected or TinyUSB error */
         atomic_store(&g_tx_paused, true);
         return false;
     }
@@ -329,7 +327,6 @@ esp_err_t usb_cdc_write(const uint8_t *buf, size_t len)
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* Block until host accepts the data or a break/stop occurs. */
     while (len > 0) {
         if (usb_cdc_break_signaled()) {
             usb_cdc_break_clear();
@@ -338,7 +335,6 @@ esp_err_t usb_cdc_write(const uint8_t *buf, size_t len)
         }
 
         if (!usb_cdc_write_available(len)) {
-            /* Host TX buffer full or paused; yield and retry. */
             if (atomic_load(&g_tx_paused)) {
                 return ESP_ERR_NOT_FINISHED;
             }
@@ -370,4 +366,69 @@ void usb_cdc_flow_resume(void)
 size_t usb_cdc_tx_pending(void)
 {
     return atomic_load(&g_tx_pending);
+}
+
+/*============================================================================*/
+void usb_cdc_set_dtr_rts(bool dtr, bool rts)
+{
+    /* ISR-safe atomic store; no mutex. */
+    g_dtr_current = dtr;
+    g_rts_current = rts;
+}
+
+/*============================================================================*/
+esp_err_t usb_cdc_get_capabilities(usb_cdc_caps_t *out)
+{
+    if (out == NULL || g_mutex == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->connected     = tud_cdc_connected();
+    out->dtr_active    = atomic_load(&g_dtr_current);
+    out->rts_active    = atomic_load(&g_rts_current);
+    out->vid           = g_vid;
+    out->pid           = g_pid;
+    memcpy(out->serial,          g_serial, sizeof(g_serial));
+    memcpy(out->manufacturer,    "GhostBreach", sizeof("GhostBreach"));
+    memcpy(out->product,         "REAPER", sizeof("REAPER"));
+    out->tx_avail      = (uint32_t)tud_cdc_write_available();
+    out->tx_pending    = (size_t)atomic_load(&g_tx_pending);
+
+    xSemaphoreGive(g_mutex);
+    return ESP_OK;
+}
+
+/*============================================================================*/
+esp_err_t usb_cdc_caps_to_json(char *buf, size_t bufsz)
+{
+    if (buf == NULL || bufsz == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    usb_cdc_caps_t caps;
+    esp_err_t rc = usb_cdc_get_capabilities(&caps);
+    if (rc != ESP_OK) {
+        return rc;
+    }
+
+    int n = snprintf(buf, bufsz,
+        "{\"connected\":%s,\"dtr\":%s,\"rts\":%s,"
+        "\"vid\":\"0x%04X\",\"pid\":\"0x%04X\","
+        "\"serial\":\"%s\",\"manufacturer\":\"%s\",\"product\":\"%s\","
+        "\"tx_avail\":%u,\"tx_pending\":%zu}",
+        caps.connected ? "true" : "false",
+        caps.dtr_active ? "true" : "false",
+        caps.rts_active ? "true" : "false",
+        caps.vid, caps.pid,
+        caps.serial, caps.manufacturer, caps.product,
+        caps.tx_avail, caps.tx_pending);
+
+    if (n < 0 || (size_t)n >= bufsz) {
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }

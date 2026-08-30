@@ -42,17 +42,19 @@ static const char *TAG = "jsonrpc";
 /* -------------------------------------------------------------------------
  *  TinyUSB callbacks
  * ----------------------------------------------------------------------- */
-/* Track DTR falling edge to detect terminal break/Ctrl-C. */
+/* Track DTR/RTS state for capability detection and break signaling. */
 static bool g_dtr_prev = false;
 
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
 {
-    (void)itf; (void)rts;
+    (void)itf;
     if (g_dtr_prev && !dtr) {
         /* DTR falling edge: terminal sent break or disconnected. */
         usb_cdc_break_signal();
     }
     g_dtr_prev = dtr;
+    /* Store current state for usb_cdc_get_capabilities(). */
+    usb_cdc_set_dtr_rts(dtr, rts);
 }
 
 void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding)
