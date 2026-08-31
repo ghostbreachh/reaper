@@ -62,6 +62,11 @@ typedef struct {
     bool has_btm;
     uint8_t neighbor_count;
     neighbor_entry_t neighbors[8];
+    /* Multi-BSSID support */
+    bool is_multi_bssid;
+    bool is_transmitted_bssid;
+    uint8_t max_bssid_indicator;
+    uint8_t bssid_index;
 } ap_info_t;
 
 typedef struct {
@@ -153,28 +158,6 @@ typedef struct {
     char jtag_serial[32];          // iSerial if available, else empty
     char cdc_iface[16];            // e.g. "ttyACM0" hint for debug
     uint8_t reason;                // why a transport was chosen
-} port_detect_result_t;
-
-#define PORT_REASON_JTAG_ONLY   0x01
-#define PORT_REASON_CDC_ONLY    0x02
-#define PORT_REASON_BOTH        0x03
-#define PORT_REASON_FALLBACK    0x04
-
-typedef enum {
-    PORT_TRANSPORT_UART0 = 0,
-    PORT_TRANSPORT_CDC,
-    PORT_TRANSPORT_UNKNOWN,
-    PORT_TRANSPORT_BOTH
-} port_transport_t;
-
-typedef struct {
-    port_transport_t active;
-    bool usb_serial_jtag_present;
-    bool cdc_acm_present;
-    bool both_active;
-    char jtag_serial[32];
-    char cdc_iface[16];
-    uint8_t reason;
 } port_detect_result_t;
 
 #define PORT_REASON_JTAG_ONLY   0x01
