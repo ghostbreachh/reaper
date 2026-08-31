@@ -9,6 +9,53 @@ static const char *TAG = "wifi_rrm";
 #define IE_MBSSID          55
 #define IE_HE_CAPABILITIES 35
 #define NBR_MIN_LEN 15
+#define IE_COUNTRY 11
+#define COUNTRY_MIN_LEN 6 /* cc[2] + env + 1 subband triplet */
+
+static uint8_t wifi_country_extract_tx_power(const uint8_t *data, size_t len)
+{
+    if (data == NULL || len < COUNTRY_MIN_LEN) return 0;
+    size_t pos = 4; /* after country_code[2] + environment */
+    while (pos + 3 <= len) {
+        uint8_t first_ch = data[pos + 1];
+        uint8_t max_tx = data[pos + 3];
+        if (pos + 5 <= len) {
+            if (first_ch == 0) pos += 5;
+            else pos += 4;
+        } else {
+            break;
+        }
+        return max_tx;
+    }
+    return 0;
+}
+
+bool wifi_country_parse(const uint8_t *ies, size_t len,
+                         char *out_country_code, size_t cc_sz,
+                         uint8_t *out_reg_class, uint8_t *out_max_tx_power)
+{
+    if (ies == NULL || len == 0 || out_country_code == NULL || cc_sz == 0) return false;
+    out_country_code[0] = '\0';
+    if (out_reg_class) *out_reg_class = 0;
+    if (out_max_tx_power) *out_max_tx_power = 0;
+
+    size_t pos = 0;
+    while (pos + 2 <= len) {
+        uint8_t tag_id = ies[pos];
+        uint8_t tag_len = ies[pos + 1];
+        if (pos + 2 + tag_len > len) break;
+
+        if (tag_id == IE_COUNTRY && tag_len >= COUNTRY_MIN_LEN - 2) {
+            memcpy(out_country_code, &ies[pos + 2], 2);
+            out_country_code[2] = '\0';
+            if (out_reg_class) *out_reg_class = ies[pos + 4];
+            if (out_max_tx_power) *out_max_tx_power = wifi_country_extract_tx_power(&ies[pos + 2], tag_len);
+            return true;
+        }
+        pos += 2 + tag_len;
+    }
+    return false;
+}
 
 bool wifi_rrm_parse_beacon(const uint8_t *ies, size_t len,
                            neighbor_entry_t *out_nbrs, uint8_t *out_nbr_count)

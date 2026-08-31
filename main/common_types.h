@@ -71,6 +71,11 @@ typedef struct {
     bool he_capable;
     uint8_t he_mcs_nss; /* bit 0-3 = NSS, bit 4-7 = MCS */
     uint8_t he_ppdu_type; /* 0=unknown, 1=he-mu, 2=he-su */
+    /* Regulatory domain */
+    bool regdom_present;
+    char country_code[3]; /* "US", "EU", "JP", etc. */
+    uint8_t reg_class;
+    uint8_t max_tx_power;
 } ap_info_t;
 
 typedef struct {

@@ -18,6 +18,9 @@ bool wifi_mbssid_parse(const uint8_t *ies, size_t len,
                        uint8_t *out_max_bssid_ind, uint8_t *out_bssid_idx);
 bool wifi_he_parse(const uint8_t *ies, size_t len,
                    bool *out_he_capable, uint8_t *out_mcs_nss, uint8_t *out_ppdu_type);
+bool wifi_country_parse(const uint8_t *ies, size_t len,
+                        char *out_country_code, size_t cc_sz,
+                        uint8_t *out_reg_class, uint8_t *out_max_tx_power);
 
 #ifdef __cplusplus
 }
