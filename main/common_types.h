@@ -208,20 +208,18 @@ typedef enum {
     DEAUTH_TYPE_BROADCAST
 } deauth_type_t;
 
-typedef struct {
-    uint8_t bssid[6];
-    uint8_t client_mac[6];
-    deauth_type_t type;
-    uint32_t count;
-    uint32_t delay_ms;
-    bool active;
-    bool wpa3_sae;
-    bool pmf_required;
 typedef enum {
     DEAUTH_FALLBACK_NONE = 0,
     DEAUTH_FALLBACK_DISASSOC = 1,
     DEAUTH_FALLBACK_AUTH_FLOOD = 2
 } deauth_fallback_t;
+
+typedef enum {
+    DEAUTH_MODE_FALLBACK_CHAIN = 0,
+    DEAUTH_MODE_DEAUTH_ONLY    = 1,
+    DEAUTH_MODE_DISASSOC_ONLY  = 2,
+    DEAUTH_MODE_AUTH_FLOOD_ONLY = 3
+} deauth_mode_t;
 
 typedef struct {
     uint8_t bssid[6];
@@ -232,6 +230,7 @@ typedef struct {
     bool active;
     bool wpa3_sae;
     bool pmf_required;
+    deauth_mode_t mode;
     deauth_fallback_t fallback_level;
     uint32_t disassoc_count;
     uint32_t auth_count;

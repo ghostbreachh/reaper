@@ -226,7 +226,7 @@ void doj_feed(const uint8_t *data, size_t len)
 
 kick:
     deauth_remove_all();                  /* keep target list dedup'd */
-    deauth_add_target(g_doj_bssid, client, 5, 10);
+    deauth_add_target(g_doj_bssid, client, 5, 10, DEAUTH_MODE_FALLBACK_CHAIN);
     deauth_start();
     ESP_LOGI(TAG, "DOJ: kick %02X:%02X:%02X:%02X:%02X:%02X",
              client[0], client[1], client[2],

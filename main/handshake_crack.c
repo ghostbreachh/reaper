@@ -465,7 +465,7 @@ esp_err_t handshake_capture_start(const uint8_t *bssid, const uint8_t *client_ma
     if (force_deauth) {
         deauth_remove_all();
         if (bssid != NULL) {
-            deauth_attack_ap_all_clients(bssid, 0, 0);
+            deauth_attack_ap_all_clients(bssid, 0, 0, DEAUTH_MODE_FALLBACK_CHAIN);
             deauth_start();
         }
     }

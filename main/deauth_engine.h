@@ -4,7 +4,7 @@
 #include "common_types.h"
 
 esp_err_t deauth_init(void);
-esp_err_t deauth_add_target(const uint8_t *bssid, const uint8_t *client_mac, uint32_t count, uint32_t delay_ms);
+esp_err_t deauth_add_target(const uint8_t *bssid, const uint8_t *client_mac, uint32_t count, uint32_t delay_ms, deauth_mode_t mode);
 esp_err_t deauth_start(void);
 void deauth_stop(void);
 bool deauth_is_active(void);

@@ -230,8 +230,14 @@ void cli_dispatch_command(int argc, char *argv[])
                 if (t && t->printf) t->printf("Invalid BSSID format\n");
             } else {
                 uint32_t count = arg_to_u32(argv[3], 100);
+                deauth_mode_t mode = DEAUTH_MODE_FALLBACK_CHAIN;
+                if (argc >= 5) {
+                    if (strcmp(argv[4], "deauth") == 0) mode = DEAUTH_MODE_DEAUTH_ONLY;
+                    else if (strcmp(argv[4], "disassoc") == 0) mode = DEAUTH_MODE_DISASSOC_ONLY;
+                    else if (strcmp(argv[4], "auth") == 0) mode = DEAUTH_MODE_AUTH_FLOOD_ONLY;
+                }
                 deauth_remove_all();
-                deauth_attack_ap_all_clients(bssid, count, 0);
+                deauth_attack_ap_all_clients(bssid, count, 0, mode);
             }
         } else if (strcmp(argv[1], "client") == 0 && argc >= 4) {
             uint8_t bssid[6], client[6];
@@ -242,8 +248,14 @@ void cli_dispatch_command(int argc, char *argv[])
                 if (t && t->printf) t->printf("Invalid MAC format\n");
             } else {
                 uint32_t count = arg_to_u32(argv[4], 50);
+                deauth_mode_t mode = DEAUTH_MODE_FALLBACK_CHAIN;
+                if (argc >= 6) {
+                    if (strcmp(argv[5], "deauth") == 0) mode = DEAUTH_MODE_DEAUTH_ONLY;
+                    else if (strcmp(argv[5], "disassoc") == 0) mode = DEAUTH_MODE_DISASSOC_ONLY;
+                    else if (strcmp(argv[5], "auth") == 0) mode = DEAUTH_MODE_AUTH_FLOOD_ONLY;
+                }
                 deauth_remove_all();
-                deauth_add_target(bssid, client, count, 0);
+                deauth_add_target(bssid, client, count, 0, mode);
                 deauth_start();
             }
         } else if (strcmp(argv[1], "stop") == 0) {
@@ -252,7 +264,14 @@ void cli_dispatch_command(int argc, char *argv[])
         } else if (strcmp(argv[1], "list") == 0) {
             if (t && t->printf) t->printf("Deauth targets: %d\n", g_deauth_target_count);
             for (int i = 0; i < g_deauth_target_count; i++) {
-                t->printf("  [%d] BSSID: %02X:%02X:%02X:%02X:%02X:%02X -> CLIENT: %02X:%02X:%02X:%02X:%02X:%02X [count=%" PRIu32 " active=%d]\n",
+                const char *mode_str = "auto";
+                switch (g_deauth_targets[i].mode) {
+                    case DEAUTH_MODE_DEAUTH_ONLY:    mode_str = "deauth"; break;
+                    case DEAUTH_MODE_DISASSOC_ONLY:  mode_str = "disassoc"; break;
+                    case DEAUTH_MODE_AUTH_FLOOD_ONLY: mode_str = "auth"; break;
+                    default: break;
+                }
+                t->printf("  [%d] BSSID: %02X:%02X:%02X:%02X:%02X:%02X -> CLIENT: %02X:%02X:%02X:%02X:%02X:%02X [count=%" PRIu32 " mode=%s active=%d]\n",
                           i,
                           g_deauth_targets[i].bssid[0], g_deauth_targets[i].bssid[1],
                           g_deauth_targets[i].bssid[2], g_deauth_targets[i].bssid[3],
@@ -260,7 +279,7 @@ void cli_dispatch_command(int argc, char *argv[])
                           g_deauth_targets[i].client_mac[0], g_deauth_targets[i].client_mac[1],
                           g_deauth_targets[i].client_mac[2], g_deauth_targets[i].client_mac[3],
                           g_deauth_targets[i].client_mac[4], g_deauth_targets[i].client_mac[5],
-                          g_deauth_targets[i].count, g_deauth_targets[i].active);
+                          g_deauth_targets[i].count, mode_str, g_deauth_targets[i].active);
             }
         } else {
             if (t && t->printf) t->printf("Unknown deauth command\n");
