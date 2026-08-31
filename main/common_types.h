@@ -49,6 +49,8 @@ typedef struct {
     bool pmf_capable;
     bool pmf_required;
     uint16_t rsn_version;
+    bool wpa3_sae;
+    uint8_t akm_count;
 } ap_info_t;
 
 typedef struct {
@@ -213,6 +215,8 @@ typedef struct {
     uint32_t count;
     uint32_t delay_ms;
     bool active;
+    bool wpa3_sae;
+    bool pmf_required;
 } deauth_target_t;
 
 // ============================================================================

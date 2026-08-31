@@ -3,6 +3,10 @@
 #include "led_indicator.h"
 #include "wifi_sniffer.h"
 #include "esp_wifi.h"
+#ifndef MACSTR
+#define MACSTR "%02X:%02X:%02X:%02X:%02X:%02X"
+#define MAC2STR(m) (m)[0],(m)[1],(m)[2],(m)[3],(m)[4],(m)[5]
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -30,9 +34,20 @@ static atomic_bool g_deauth_active = ATOMIC_VAR_INIT(false);
 static SemaphoreHandle_t g_deauth_lock = NULL;
 static uint16_t g_deauth_seq = 0;
 
+static bool deauth_target_is_protected(const uint8_t *bssid)
+{
+    bool pmf_req = false, wpa3 = false;
+    if (!wifi_sniffer_get_security(bssid, &pmf_req, &wpa3)) return false;
+    return pmf_req && wpa3;
+}
+
 static void deauth_send_frame(const uint8_t *dst, const uint8_t *src, const uint8_t *bssid)
 {
     if (dst == NULL || src == NULL || bssid == NULL) {
+        return;
+    }
+    if (deauth_target_is_protected(bssid)) {
+        ESP_LOGW(TAG, "skipping protected target " MACSTR " (WPA3+PMF)", MAC2STR(bssid));
         return;
     }
 

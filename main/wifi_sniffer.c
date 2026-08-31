@@ -109,6 +109,20 @@ static bool parse_ssid_tag(const uint8_t *frame, size_t len, size_t offset, char
     return false;
 }
 
+
+// ============================================================================
+//  SAE/WPA3 DETECTION DECISION
+// ============================================================================
+//  Branch A — Detect WPA3 by presence of AKM 0x000F (SAE) in RSN IE
+//    Decision: ACCEPTED. Direct, cheap, and standard: WPA3-Personal always
+//    uses SAE as the sole AKM. Works on both beacons and probe_resp.
+//  Branch B — Detect WPA3 by VHT/HE capabilities + RSN IE combined
+//    Decision: REJECTED. Complexity without reliability: WPA3-Enterprise uses
+//    different AKMs, and VHT/HE presence does not imply WPA3.
+//  Branch C — Reject deauth based only on PMF required flag
+//    Decision: REJECTED. Insufficient: PMF-capable non-WPA3 networks can
+//    still be deauthed cleanly; WPA3+PMF is the true no-deauth zone.
+
 // ============================================================================
 //  PMF PARSING DECISION
 // ============================================================================
@@ -122,12 +136,16 @@ static bool parse_ssid_tag(const uint8_t *frame, size_t len, size_t offset, char
 //    Decision: REJECTED. Adds unnecessary indirection; raw frame parse is
 //    cheaper and keeps PMF state local to sniffer for offline reports.
 //
-static bool pmf_parse_rsn(const uint8_t *ies, size_t len, bool *out_capable, bool *out_required, uint16_t *out_rsn_ver)
+static bool pmf_parse_rsn(const uint8_t *ies, size_t len,
+                           bool *out_capable, bool *out_required, uint16_t *out_rsn_ver,
+                           bool *out_sae, uint8_t *out_akm_count)
 {
     if (ies == NULL || len == 0 || out_capable == NULL || out_required == NULL || out_rsn_ver == NULL) return false;
     *out_capable = false;
     *out_required = false;
     *out_rsn_ver = 0;
+    if (out_sae != NULL) *out_sae = false;
+    if (out_akm_count != NULL) *out_akm_count = 0;
 
     size_t pos = 0;
     while (pos + 2 <= len) {
@@ -145,10 +163,21 @@ static bool pmf_parse_rsn(const uint8_t *ies, size_t len, bool *out_capable, boo
                 uint16_t caps = (uint16_t)(ies[pos + 8] | ((uint16_t)ies[pos + 9] << 8));
                 *out_capable = true;
                 *out_required = (caps & 0x0008) != 0; /* MFP required bit */
-                return true;
             }
-            *out_capable = true;
-            return true;
+            if (out_akm_count != NULL && tag_len >= 10) {
+                uint8_t akm_count = ies[pos + 9];
+                if (akm_count > 8U) akm_count = 8U;
+                *out_akm_count = akm_count;
+                size_t akm_off = pos + 10;
+                for (uint8_t k = 0; k < akm_count && akm_off + 4 <= pos + 2 + tag_len; k++) {
+                    uint16_t akm_type = (uint16_t)(ies[akm_off + 3] | ((uint16_t)ies[akm_off + 2] << 8));
+                    if (akm_type == 0x000F && out_sae != NULL) {
+                        *out_sae = true;
+                    }
+                    akm_off += 4;
+                }
+            }
+            if (*out_capable) return true;
         }
         if (tag_id == 70 && tag_len >= 1) {
             /* RSNXE: bit 7 of byte[0] = MFP capable, bit 6 = MFP required */
@@ -162,7 +191,8 @@ static bool pmf_parse_rsn(const uint8_t *ies, size_t len, bool *out_capable, boo
 }
 
 static void add_ap_locked(const uint8_t *bssid, const char *ssid, int8_t rssi, uint8_t channel,
-                           bool pmf_capable, bool pmf_required, uint16_t rsn_version)
+                           bool pmf_capable, bool pmf_required, uint16_t rsn_version,
+                           bool wpa3_sae, uint8_t akm_count)
 {
     if (!mac_is_valid_unicast(bssid)) return;
 
@@ -182,6 +212,10 @@ static void add_ap_locked(const uint8_t *bssid, const char *ssid, int8_t rssi, u
                 g_ap_list[i].pmf_required = pmf_required;
                 g_ap_list[i].rsn_version = rsn_version;
             }
+            if (wpa3_sae) {
+                g_ap_list[i].wpa3_sae = true;
+                g_ap_list[i].akm_count = akm_count;
+            }
             return;
         }
     }
@@ -199,6 +233,8 @@ static void add_ap_locked(const uint8_t *bssid, const char *ssid, int8_t rssi, u
         g_ap_list[g_ap_count].pmf_capable = pmf_capable;
         g_ap_list[g_ap_count].pmf_required = pmf_required;
         g_ap_list[g_ap_count].rsn_version = rsn_version;
+        g_ap_list[g_ap_count].wpa3_sae = wpa3_sae;
+        g_ap_list[g_ap_count].akm_count = akm_count;
         g_ap_count++;
     }
 }
@@ -245,6 +281,27 @@ static void add_client_locked(const uint8_t *client_mac, const uint8_t *ap_bssid
         g_client_list[g_client_count].pkt_count = 1;
         g_client_count++;
     }
+}
+
+
+bool wifi_sniffer_get_security(const uint8_t *bssid, bool *out_pmf_required, bool *out_wpa3_sae)
+{
+    if (bssid == NULL || out_pmf_required == NULL || out_wpa3_sae == NULL) return false;
+    *out_pmf_required = false;
+    *out_wpa3_sae = false;
+    if (g_wifi_lock == NULL) return false;
+
+    xSemaphoreTake(g_wifi_lock, portMAX_DELAY);
+    for (int i = 0; i < g_ap_count; i++) {
+        if (memcmp(g_ap_list[i].bssid, bssid, 6) == 0) {
+            *out_pmf_required = g_ap_list[i].pmf_required;
+            *out_wpa3_sae = g_ap_list[i].wpa3_sae;
+            xSemaphoreGive(g_wifi_lock);
+            return true;
+        }
+    }
+    xSemaphoreGive(g_wifi_lock);
+    return false;
 }
 
 void wifi_sniffer_get_ssid_for_bssid(const uint8_t *bssid, char *out_ssid, size_t max_len)
@@ -390,15 +447,15 @@ static void parse_wifi_packet(const wifi_pkt_msg_t *msg)
             parse_ssid_tag(data, len, 36, ssid, sizeof(ssid));
             bool pmf_cap=false, pmf_req=false;
             uint16_t rsn_ver=0;
-            pmf_parse_rsn(data + 24, len - 24, &pmf_cap, &pmf_req, &rsn_ver);
-            add_ap_locked(hdr->addr3, ssid, msg->rssi, msg->channel, pmf_cap, pmf_req, rsn_ver);
+            pmf_parse_rsn(data + 24, len - 24, &pmf_cap, &pmf_req, &rsn_ver, &wpa3_sae, &akm_count);
+            add_ap_locked(hdr->addr3, ssid, msg->rssi, msg->channel, pmf_cap, pmf_req, rsn_ver, wpa3_sae, akm_count);
         } else if (subtype == 4) {
             g_wifi_stats.probe_req++;
             char ssid[33] = {0};
             parse_ssid_tag(data, len, 24, ssid, sizeof(ssid));
             bool pmf_cap2=false, pmf_req2=false;
             uint16_t rsn_ver2=0;
-            pmf_parse_rsn(data + 12, len - 12, &pmf_cap2, &pmf_req2, &rsn_ver2);
+            pmf_parse_rsn(data + 12, len - 12, &pmf_cap2, &pmf_req2, &rsn_ver2, NULL, NULL);
             add_client_locked(hdr->addr2, NULL, msg->rssi, msg->channel);
         } else if (subtype == 12) {
             g_wifi_stats.deauth++;
