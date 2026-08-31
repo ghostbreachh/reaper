@@ -109,7 +109,60 @@ static bool parse_ssid_tag(const uint8_t *frame, size_t len, size_t offset, char
     return false;
 }
 
-static void add_ap_locked(const uint8_t *bssid, const char *ssid, int8_t rssi, uint8_t channel)
+// ============================================================================
+//  PMF PARSING DECISION
+// ============================================================================
+//  Branch A — Parse RSN IE only in beacon parser
+//    Decision: REJECTED. Probe responses also carry RSN; limiting to beacons
+//    misses APs only seen in probe_resp during sparse scanning.
+//  Branch B — Parse RSN IE in both beacon + probe_resp with shared helper
+//    Decision: ACCEPTED. Covers all discovery paths; single helper keeps code
+//    DRY and gives full PMF coverage during wardrive.
+//  Branch C — Offload PMF detection to JSON-RPC schema post-parse
+//    Decision: REJECTED. Adds unnecessary indirection; raw frame parse is
+//    cheaper and keeps PMF state local to sniffer for offline reports.
+//
+static bool pmf_parse_rsn(const uint8_t *ies, size_t len, bool *out_capable, bool *out_required, uint16_t *out_rsn_ver)
+{
+    if (ies == NULL || len == 0 || out_capable == NULL || out_required == NULL || out_rsn_ver == NULL) return false;
+    *out_capable = false;
+    *out_required = false;
+    *out_rsn_ver = 0;
+
+    size_t pos = 0;
+    while (pos + 2 <= len) {
+        uint8_t tag_id = ies[pos];
+        uint8_t tag_len = ies[pos + 1];
+        if (pos + 2 + tag_len > len) break;
+
+        if (tag_id == 48 && tag_len >= 2) {
+            /* RSN IE: first 2 bytes = version */
+            uint16_t ver = (uint16_t)(ies[pos + 2] | ((uint16_t)ies[pos + 3] << 8));
+            *out_rsn_ver = ver;
+
+            /* RSN capabilities at offset 6 (after version[2] + group_cipher[4] + pairwise_count[2] + akm_count[2] + pairwise[2] + akm[2]) */
+            if (tag_len >= 8) {
+                uint16_t caps = (uint16_t)(ies[pos + 8] | ((uint16_t)ies[pos + 9] << 8));
+                *out_capable = true;
+                *out_required = (caps & 0x0008) != 0; /* MFP required bit */
+                return true;
+            }
+            *out_capable = true;
+            return true;
+        }
+        if (tag_id == 70 && tag_len >= 1) {
+            /* RSNXE: bit 7 of byte[0] = MFP capable, bit 6 = MFP required */
+            *out_capable = true;
+            *out_required = (ies[pos + 2] & 0xC0) == 0xC0;
+            return true;
+        }
+        pos += 2 + tag_len;
+    }
+    return false;
+}
+
+static void add_ap_locked(const uint8_t *bssid, const char *ssid, int8_t rssi, uint8_t channel,
+                           bool pmf_capable, bool pmf_required, uint16_t rsn_version)
 {
     if (!mac_is_valid_unicast(bssid)) return;
 
@@ -123,6 +176,11 @@ static void add_ap_locked(const uint8_t *bssid, const char *ssid, int8_t rssi, u
                 if (g_ap_list[i].ssid[0] == '\0' || strcmp(g_ap_list[i].ssid, "<HIDDEN>") == 0) {
                     snprintf(g_ap_list[i].ssid, sizeof(g_ap_list[i].ssid), "%s", ssid);
                 }
+            }
+            if (pmf_capable) {
+                g_ap_list[i].pmf_capable = true;
+                g_ap_list[i].pmf_required = pmf_required;
+                g_ap_list[i].rsn_version = rsn_version;
             }
             return;
         }
@@ -138,6 +196,9 @@ static void add_ap_locked(const uint8_t *bssid, const char *ssid, int8_t rssi, u
         g_ap_list[g_ap_count].rssi = rssi;
         g_ap_list[g_ap_count].channel = channel;
         g_ap_list[g_ap_count].pkt_count = 1;
+        g_ap_list[g_ap_count].pmf_capable = pmf_capable;
+        g_ap_list[g_ap_count].pmf_required = pmf_required;
+        g_ap_list[g_ap_count].rsn_version = rsn_version;
         g_ap_count++;
     }
 }
@@ -327,11 +388,17 @@ static void parse_wifi_packet(const wifi_pkt_msg_t *msg)
             else g_wifi_stats.probe_resp++;
             char ssid[33] = {0};
             parse_ssid_tag(data, len, 36, ssid, sizeof(ssid));
-            add_ap_locked(hdr->addr3, ssid, msg->rssi, msg->channel);
+            bool pmf_cap=false, pmf_req=false;
+            uint16_t rsn_ver=0;
+            pmf_parse_rsn(data + 24, len - 24, &pmf_cap, &pmf_req, &rsn_ver);
+            add_ap_locked(hdr->addr3, ssid, msg->rssi, msg->channel, pmf_cap, pmf_req, rsn_ver);
         } else if (subtype == 4) {
             g_wifi_stats.probe_req++;
             char ssid[33] = {0};
             parse_ssid_tag(data, len, 24, ssid, sizeof(ssid));
+            bool pmf_cap2=false, pmf_req2=false;
+            uint16_t rsn_ver2=0;
+            pmf_parse_rsn(data + 12, len - 12, &pmf_cap2, &pmf_req2, &rsn_ver2);
             add_client_locked(hdr->addr2, NULL, msg->rssi, msg->channel);
         } else if (subtype == 12) {
             g_wifi_stats.deauth++;
@@ -637,15 +704,17 @@ void wifi_sniffer_fprint(FILE *out)
     fprintf(out, "\n=============================================================\n");
     fprintf(out, "                  DISCOVERED ACCESS POINTS (%d)\n", g_ap_count);
     fprintf(out, "=============================================================\n");
-    fprintf(out, " #  | BSSID             | CH | RSSI | PKTS     | SSID\n");
-    fprintf(out, "----+-------------------+----+------+----------+-----------------\n");
+    fprintf(out, " #  | BSSID             | CH | RSSI | PKTS     | PMF       | SSID\n");
+    fprintf(out, "----+-------------------+----+------+----------+-----------+-----------------\n");
 
     for (int i = 0; i < g_ap_count; i++) {
-        fprintf(out, "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-2d | %-4d | %-8" PRIu32 " | %s\n",
+        const char *pmf_str = "no";
+        if (g_ap_list[i].pmf_capable) pmf_str = g_ap_list[i].pmf_required ? "REQUIRED" : "capable";
+        fprintf(out, "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-2d | %-4d | %-8" PRIu32 " | %-9s | %s\n",
                 i + 1,
                 g_ap_list[i].bssid[0], g_ap_list[i].bssid[1], g_ap_list[i].bssid[2],
                 g_ap_list[i].bssid[3], g_ap_list[i].bssid[4], g_ap_list[i].bssid[5],
-                g_ap_list[i].channel, g_ap_list[i].rssi, g_ap_list[i].pkt_count, g_ap_list[i].ssid);
+                g_ap_list[i].channel, g_ap_list[i].rssi, g_ap_list[i].pkt_count, pmf_str, g_ap_list[i].ssid);
     }
 
     fprintf(out, "\n=============================================================\n");

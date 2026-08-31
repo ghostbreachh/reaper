@@ -46,6 +46,9 @@ typedef struct {
     int8_t rssi;
     uint8_t channel;
     uint32_t pkt_count;
+    bool pmf_capable;
+    bool pmf_required;
+    uint16_t rsn_version;
 } ap_info_t;
 
 typedef struct {
