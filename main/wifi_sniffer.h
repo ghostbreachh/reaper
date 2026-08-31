@@ -22,6 +22,8 @@ void wifi_sniffer_get_ssid_for_bssid(const uint8_t *bssid, char *out_ssid, size_
 bool wifi_sniffer_get_security(const uint8_t *bssid, bool *out_pmf_required, bool *out_wpa3_sae);
 void wifi_sniffer_get_ap_bssid_and_channel_for_client(const uint8_t *client_mac, uint8_t *out_bssid, uint8_t *out_channel);
 bool wifi_sniffer_get_channel_for_bssid(const uint8_t *bssid, uint8_t *out_channel);
+bool wifi_sniffer_get_neighbors(const uint8_t *bssid, neighbor_entry_t *out, uint8_t max, uint8_t *out_count);
+bool wifi_sniffer_get_rrm_btm(const uint8_t *bssid, bool *out_rrm, bool *out_btm);
 void wifi_sniffer_clear_fixed_channel(void);
 void wifi_sniffer_print_clients_of_ap(const uint8_t *bssid);
 

@@ -27,5 +27,6 @@
 #include "structured_log.h"
 #include "health_telemetry.h"
 #include "usb_cdc.h"
+#include "wifi_rrm.h"
 
 #endif // HELPER_H

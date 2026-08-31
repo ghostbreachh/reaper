@@ -42,6 +42,12 @@ typedef struct {
 
 typedef struct {
     uint8_t bssid[6];
+    uint8_t channel;
+    uint8_t phy_mode; /* 0=unknown, 1=b, 2=a/g, 3=n, 4=ac, 5=ax */
+} neighbor_entry_t;
+
+typedef struct {
+    uint8_t bssid[6];
     char ssid[33];
     int8_t rssi;
     uint8_t channel;
@@ -51,6 +57,11 @@ typedef struct {
     uint16_t rsn_version;
     bool wpa3_sae;
     uint8_t akm_count;
+    /* 802.11k/v/r neighbor report support */
+    bool has_rrm;
+    bool has_btm;
+    uint8_t neighbor_count;
+    neighbor_entry_t neighbors[8];
 } ap_info_t;
 
 typedef struct {
@@ -69,30 +80,6 @@ typedef struct {
     uint32_t probe_resp;
     uint32_t deauth;
     uint32_t disassoc;
-
-typedef enum {
-    CH_HOP_MODE_SEQUENTIAL = 0,
-    CH_HOP_MODE_RANDOM     = 1
-} ch_hop_mode_t;
-
-typedef struct {
-    uint32_t pkt_count;
-    uint32_t beacon_count;
-    uint32_t mgmt_count;
-    uint32_t data_count;
-    int32_t  rssi_sum;
-    uint32_t rssi_samples;
-    uint16_t ap_count;
-    uint16_t client_count;
-} ch_hop_stats_t;
-
-typedef struct {
-    ch_hop_mode_t mode;
-    uint16_t dwell_ms;
-    uint8_t  channel_mask;   /* bit0=ch1..bit12=ch13 */
-    uint8_t  _pad;
-} ch_hop_config_t;
-
 } wifi_stats_t;
 
 typedef struct {
