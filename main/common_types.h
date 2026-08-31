@@ -144,6 +144,13 @@ typedef struct {
     uint16_t mfg_id;
     uint32_t pkt_count;
     uint8_t tracker_score;
+    /* BT 5.0 extended advertising */
+    bool ext_adv_seen;
+    bool has_aux_ptr;
+    bool has_adi;
+    bool has_scan_rsp;
+    uint8_t adv_mode; /* 0=legacy, 1=non-conn, 2=scan */
+    uint8_t tx_power; /* dBm from AD ext header, if present */
 } ble_info_t;
 
 // ============================================================================

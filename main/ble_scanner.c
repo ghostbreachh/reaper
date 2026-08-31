@@ -1,5 +1,6 @@
 #include <stdatomic.h>
 #include "ble_scanner.h"
+#include "ble_ext_adv.h"
 #include "led_indicator.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -9,6 +10,16 @@
 #include "host/ble_hs.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
+
+// ============================================================================
+//  EXTENDED ADVERTISING (BT 5.0) DECISION
+// ============================================================================
+//  Branch A — Full extended advertising parser inside ble_scanner.c
+//    Decision: REJECTED. Parser becomes too large; keep it isolated.
+//  Branch B — Separate ble_ext_adv.c/h module
+//    Decision: ACCEPTED. Clean separation; reusable from JSON-RPC/CLI.
+//  Branch C — Post-parse JSON-RPC handler
+//    Decision: REJECTED. Raw parse is cheaper and keeps state local.
 
 static const char *TAG = "ble_scanner";
 
@@ -80,7 +91,13 @@ static void add_or_update_ble_locked(
     uint8_t addr_type,
     const char *name,
     int8_t rssi,
-    uint16_t mfg_id
+    uint16_t mfg_id,
+    bool ext_adv_seen,
+    bool has_aux_ptr,
+    bool has_adi,
+    uint8_t adv_mode,
+    bool has_scan_rsp,
+    uint8_t tx_power
 )
 {
     bool has_name = (name != NULL && name[0] != '\0');
@@ -114,6 +131,7 @@ static void add_or_update_ble_locked(
                 g_ble_list[i].mfg_id,
                 g_ble_list[i].pkt_count
             );
+            if (ext_adv_seen) g_ble_list[i].tracker_score++;
 
             return;
         }
@@ -148,6 +166,13 @@ static void add_or_update_ble_locked(
             mfg_id,
             1
         );
+        if (ext_adv_seen) g_ble_list[g_ble_count].tracker_score++;
+        g_ble_list[g_ble_count].ext_adv_seen = ext_adv_seen;
+        g_ble_list[g_ble_count].has_aux_ptr = has_aux_ptr;
+        g_ble_list[g_ble_count].has_adi = has_adi;
+        g_ble_list[g_ble_count].adv_mode = adv_mode;
+        g_ble_list[g_ble_count].has_scan_rsp = has_scan_rsp;
+        g_ble_list[g_ble_count].tx_power = tx_power;
 
         g_ble_count++;
     }
@@ -195,12 +220,22 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         if (g_ble_lock != NULL) {
             xSemaphoreTake(g_ble_lock, portMAX_DELAY);
 
+            bool ext_adv=false, aux_ptr=false, adi=false, scan_rsp=false;
+            uint8_t adv_mode=0, tx_power=0x7F;
+            if (event->disc.data != NULL && event->disc.length_data > 0) {
+                ext_adv = ble_ext_adv_parse(
+                    event->disc.data,
+                    event->disc.length_data,
+                    &aux_ptr, &adi, &adv_mode, &scan_rsp, &tx_power
+                );
+            }
             add_or_update_ble_locked(
                 event->disc.addr.val,
                 event->disc.addr.type,
                 name,
                 event->disc.rssi,
-                mfg_id
+                mfg_id,
+                ext_adv, aux_ptr, adi, adv_mode, scan_rsp, tx_power
             );
 
             xSemaphoreGive(g_ble_lock);
@@ -368,13 +403,19 @@ void ble_scanner_fprint(FILE *out)
     fprintf(out, "=========================================================================\n");
     fprintf(out, "                     DISCOVERED BLE DEVICES (%d)\n", g_ble_count);
     fprintf(out, "=========================================================================\n");
-    fprintf(out, " #  | BLE MAC           | TYPE    | RSSI | PKTS     | VENDOR      | DEVICE NAME\n");
-    fprintf(out, "----+-------------------+---------+------+----------+-------------+-----------\n");
+    fprintf(out, " #  | BLE MAC           | TYPE    | RSSI | PKTS     | EXT ADV     | VENDOR      | DEVICE NAME\n");
+    fprintf(out, "----+-------------------+---------+------+----------+-------------+-------------+-----------\n");
 
     for (int i = 0; i < g_ble_count; i++) {
+        char extadv[12] = "-";
+        if (g_ble_list[i].ext_adv_seen) {
+            if (g_ble_list[i].has_aux_ptr) snprintf(extadv, sizeof(extadv), "aux");
+            else if (g_ble_list[i].has_adi) snprintf(extadv, sizeof(extadv), "adi");
+            else snprintf(extadv, sizeof(extadv), "ext");
+        }
         fprintf(
             out,
-            "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-7s | %-4d | %-8" PRIu32 " | %-11s | %s\n",
+            "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-7s | %-4d | %-8" PRIu32 " | %-11s | %-11s | %s\n",
             i + 1,
             g_ble_list[i].mac[5],
             g_ble_list[i].mac[4],
@@ -385,6 +426,7 @@ void ble_scanner_fprint(FILE *out)
             (g_ble_list[i].addr_type == 0) ? "Public" : "Random",
             g_ble_list[i].rssi,
             g_ble_list[i].pkt_count,
+            extadv,
             get_vendor_name(g_ble_list[i].mfg_id),
             g_ble_list[i].name
         );
@@ -422,6 +464,36 @@ esp_err_t ble_scanner_save_report(const char *path)
 uint16_t ble_scanner_get_count(void)
 {
     return g_ble_count;
+}
+
+bool ble_scanner_get_ext_adv(const uint8_t *mac,
+                              bool *out_ext_adv, bool *out_aux_ptr,
+                              bool *out_adi, uint8_t *out_adv_mode,
+                              bool *out_scan_rsp, uint8_t *out_tx_power)
+{
+    if (mac == NULL || out_ext_adv == NULL) return false;
+    *out_ext_adv = false;
+    if (out_aux_ptr) *out_aux_ptr = false;
+    if (out_adi) *out_adi = false;
+    if (out_adv_mode) *out_adv_mode = 0;
+    if (out_scan_rsp) *out_scan_rsp = false;
+    if (out_tx_power) *out_tx_power = 0x7F;
+
+    xSemaphoreTake(g_ble_lock, portMAX_DELAY);
+    for (int i = 0; i < g_ble_count; i++) {
+        if (memcmp(g_ble_list[i].mac, mac, 6) == 0) {
+            *out_ext_adv = g_ble_list[i].ext_adv_seen;
+            if (out_aux_ptr) *out_aux_ptr = g_ble_list[i].has_aux_ptr;
+            if (out_adi) *out_adi = g_ble_list[i].has_adi;
+            if (out_adv_mode) *out_adv_mode = g_ble_list[i].adv_mode;
+            if (out_scan_rsp) *out_scan_rsp = g_ble_list[i].has_scan_rsp;
+            if (out_tx_power) *out_tx_power = g_ble_list[i].tx_power;
+            xSemaphoreGive(g_ble_lock);
+            return true;
+        }
+    }
+    xSemaphoreGive(g_ble_lock);
+    return false;
 }
 
 void ble_tracker_print(void)
