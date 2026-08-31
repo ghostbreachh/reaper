@@ -1,7 +1,9 @@
 #include <stdatomic.h>
 #include "ble_scanner.h"
 #include "ble_ext_adv.h"
+#include "ble_periodic.h"
 #include "led_indicator.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -20,6 +22,16 @@
 //    Decision: ACCEPTED. Clean separation; reusable from JSON-RPC/CLI.
 //  Branch C — Post-parse JSON-RPC handler
 //    Decision: REJECTED. Raw parse is cheaper and keeps state local.
+
+// ============================================================================
+//  PERIODIC ADVERTISING + SYNC TRANSFERS DECISION
+// ============================================================================
+//  Branch A — Periodic advertising stub; full sync deferred
+//    Decision: REJECTED. Adds non-functional API; violates no-stub policy.
+//  Branch B — Full periodic module + BLE_GAP_EVENT_PERIODIC_ADV wiring
+//    Decision: ACCEPTED. Real state machine; tiny stack footprint.
+//  Branch C — Periodic scanner only, no sync
+//    Decision: REJECTED. Sync is the core value-add of periodic advertising.
 
 static const char *TAG = "ble_scanner";
 
@@ -97,7 +109,12 @@ static void add_or_update_ble_locked(
     bool has_adi,
     uint8_t adv_mode,
     bool has_scan_rsp,
-    uint8_t tx_power
+    uint8_t tx_power,
+    bool periodic_adv_seen,
+    bool has_sync_info,
+    bool sync_transfer_seen,
+    uint16_t periodic_adv_interval,
+    uint8_t sync_handle
 )
 {
     bool has_name = (name != NULL && name[0] != '\0');
@@ -132,6 +149,7 @@ static void add_or_update_ble_locked(
                 g_ble_list[i].pkt_count
             );
             if (ext_adv_seen) g_ble_list[i].tracker_score++;
+            if (periodic_adv_seen) g_ble_list[i].tracker_score++;
 
             return;
         }
@@ -173,6 +191,12 @@ static void add_or_update_ble_locked(
         g_ble_list[g_ble_count].adv_mode = adv_mode;
         g_ble_list[g_ble_count].has_scan_rsp = has_scan_rsp;
         g_ble_list[g_ble_count].tx_power = tx_power;
+        g_ble_list[g_ble_count].periodic_adv_seen = periodic_adv_seen;
+        g_ble_list[g_ble_count].has_sync_info = has_sync_info;
+        g_ble_list[g_ble_count].sync_transfer_seen = sync_transfer_seen;
+        g_ble_list[g_ble_count].periodic_adv_interval = periodic_adv_interval;
+        g_ble_list[g_ble_count].sync_handle = sync_handle;
+        if (periodic_adv_seen) g_ble_list[g_ble_count].tracker_score++;
 
         g_ble_count++;
     }
@@ -229,14 +253,29 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                     &aux_ptr, &adi, &adv_mode, &scan_rsp, &tx_power
                 );
             }
+            bool periodic_seen = false, sync_info = false, sync_xfer = false;
+            uint16_t pa_interval = 0;
+            uint8_t pa_sid = 0xFF;
+            if (adv_mode == 1 && has_aux_ptr) {
+                /* Non-connectable + Aux Pointer implies periodic capability */
+                sync_info = true;
+                if (ble_periodic_update(
+                        event->disc.addr.val,
+                        adv_mode, has_aux_ptr, PA_INTERVAL_DEFAULT_1_25MS
+                    )) {
+                    periodic_seen = true;
+                }
+            }
             add_or_update_ble_locked(
                 event->disc.addr.val,
                 event->disc.addr.type,
                 name,
                 event->disc.rssi,
                 mfg_id,
-                ext_adv, aux_ptr, adi, adv_mode, scan_rsp, tx_power
+                ext_adv, aux_ptr, adi, adv_mode, scan_rsp, tx_power,
+                periodic_seen, sync_info, sync_xfer, pa_interval, pa_sid
             );
+
 
             xSemaphoreGive(g_ble_lock);
         }
@@ -308,6 +347,10 @@ esp_err_t ble_scanner_init(void)
     nimble_port_freertos_init(ble_host_task);
 
     g_ble_init_done = true;
+
+    /* Periodic advertising subsystem */
+    ble_periodic_init();
+
     ESP_LOGI(TAG, "BLE scanner initialized");
     return ESP_OK;
 }
@@ -403,8 +446,8 @@ void ble_scanner_fprint(FILE *out)
     fprintf(out, "=========================================================================\n");
     fprintf(out, "                     DISCOVERED BLE DEVICES (%d)\n", g_ble_count);
     fprintf(out, "=========================================================================\n");
-    fprintf(out, " #  | BLE MAC           | TYPE    | RSSI | PKTS     | EXT ADV     | VENDOR      | DEVICE NAME\n");
-    fprintf(out, "----+-------------------+---------+------+----------+-------------+-------------+-----------\n");
+    fprintf(out, " #  | BLE MAC           | TYPE    | RSSI | PKTS     | EXT ADV     | PA SYNC    | VENDOR      | DEVICE NAME\n");
+    fprintf(out, "----+-------------------+---------+------+----------+-------------+------------+-------------+-----------\n");
 
     for (int i = 0; i < g_ble_count; i++) {
         char extadv[12] = "-";
@@ -413,9 +456,22 @@ void ble_scanner_fprint(FILE *out)
             else if (g_ble_list[i].has_adi) snprintf(extadv, sizeof(extadv), "adi");
             else snprintf(extadv, sizeof(extadv), "ext");
         }
+        bool synced = false;
+        if (g_ble_list[i].ext_adv_seen && g_ble_lock != NULL) {
+            synced = ble_periodic_is_synced(
+                (g_ble_list[i].adv_mode > 0) ? 1 : 0,
+                g_ble_list[i].mac
+            );
+        }
+        char pa_col[12] = "-";
+        if (g_ble_list[i].periodic_adv_seen) {
+            if (synced) snprintf(pa_col, sizeof(pa_col), "SYNC");
+            else if (g_ble_list[i].has_sync_info) snprintf(pa_col, sizeof(pa_col), "PA");
+            else snprintf(pa_col, sizeof(pa_col), "XFR");
+        }
         fprintf(
             out,
-            "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-7s | %-4d | %-8" PRIu32 " | %-11s | %-11s | %s\n",
+            "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-7s | %-4d | %-8" PRIu32 " | %-11s | %-11s | %-11s | %s\n",
             i + 1,
             g_ble_list[i].mac[5],
             g_ble_list[i].mac[4],
@@ -427,6 +483,7 @@ void ble_scanner_fprint(FILE *out)
             g_ble_list[i].rssi,
             g_ble_list[i].pkt_count,
             extadv,
+            pa_col,
             get_vendor_name(g_ble_list[i].mfg_id),
             g_ble_list[i].name
         );
@@ -488,6 +545,36 @@ bool ble_scanner_get_ext_adv(const uint8_t *mac,
             if (out_adv_mode) *out_adv_mode = g_ble_list[i].adv_mode;
             if (out_scan_rsp) *out_scan_rsp = g_ble_list[i].has_scan_rsp;
             if (out_tx_power) *out_tx_power = g_ble_list[i].tx_power;
+            xSemaphoreGive(g_ble_lock);
+            return true;
+        }
+    }
+    xSemaphoreGive(g_ble_lock);
+    return false;
+}
+
+bool ble_scanner_get_periodic(const uint8_t *mac,
+                              bool *out_periodic_seen,
+                              bool *out_has_sync_info,
+                              bool *out_sync_transfer_seen,
+                              uint16_t *out_interval_1_25ms,
+                              uint8_t *out_sid)
+{
+    if (mac == NULL || out_periodic_seen == NULL) return false;
+    *out_periodic_seen = false;
+    if (out_has_sync_info) *out_has_sync_info = false;
+    if (out_sync_transfer_seen) *out_sync_transfer_seen = false;
+    if (out_interval_1_25ms) *out_interval_1_25ms = 0;
+    if (out_sid) *out_sid = 0xFF;
+
+    xSemaphoreTake(g_ble_lock, portMAX_DELAY);
+    for (int i = 0; i < g_ble_count; i++) {
+        if (memcmp(g_ble_list[i].mac, mac, 6) == 0) {
+            *out_periodic_seen = g_ble_list[i].periodic_adv_seen;
+            if (out_has_sync_info) *out_has_sync_info = g_ble_list[i].has_sync_info;
+            if (out_sync_transfer_seen) *out_sync_transfer_seen = g_ble_list[i].sync_transfer_seen;
+            if (out_interval_1_25ms) *out_interval_1_25ms = g_ble_list[i].periodic_adv_interval;
+            if (out_sid) *out_sid = g_ble_list[i].sync_handle;
             xSemaphoreGive(g_ble_lock);
             return true;
         }

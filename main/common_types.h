@@ -151,6 +151,12 @@ typedef struct {
     bool has_scan_rsp;
     uint8_t adv_mode; /* 0=legacy, 1=non-conn, 2=scan */
     uint8_t tx_power; /* dBm from AD ext header, if present */
+    /* BT 5.0 periodic advertising / sync transfer */
+    bool periodic_adv_seen;
+    bool has_sync_info;
+    bool sync_transfer_seen;
+    uint16_t periodic_adv_interval; /* units of 1.25 ms, 0 = unknown */
+    uint8_t sync_handle; /* advertising SID from ADI or sync info */
 } ble_info_t;
 
 // ============================================================================
