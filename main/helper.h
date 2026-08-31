@@ -19,6 +19,7 @@
 #include "jsonrpc.h"
 #include "jsonrpc_schema.h"
 #include "cli_transport.h"
+#include "channel_hopper.h"
 #include "nvs_persist.h"
 #include "storage_spiffs.h"
 #include "ota_http.h"

@@ -332,7 +332,7 @@ static void run_boot_scan(void)
 
     led_set_state(LED_STATE_SCANNING);
 
-    /* channel_hopper_task will call wifi_sniffer_stop() when duration expires */
+    /* Hopper + sniffer lifecycle now owned by channel_hopper.c */
     esp_err_t r = wifi_sniffer_start(BOOT_SCAN_SECS);
     if (r != ESP_OK) {
         printf("  " CYN "│" R0 "  " RED "scan skipped: %s" R0 "\n", esp_err_to_name(r));

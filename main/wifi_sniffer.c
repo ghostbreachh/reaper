@@ -1,3 +1,4 @@
+#include "channel_hopper.h"
 #include "wifi_sniffer.h"
 #include "led_indicator.h"
 #include "storage_sd.h"
@@ -361,9 +362,25 @@ static void parse_wifi_packet(const wifi_pkt_msg_t *msg)
         if (ap_mac != NULL && mac_is_valid_unicast(ap_mac)) {
             touch_ap_locked(ap_mac, msg->rssi, msg->channel);
         }
+        if (channel_hopper_is_active()) {
+            channel_hop_record_locked(msg->channel, type, subtype, msg->rssi, len);
+        }
+    }
+
+    if (channel_hopper_is_active()) {
+        channel_hop_record_locked(msg->channel, type, subtype, msg->rssi, len);
     }
 
     xSemaphoreGive(g_wifi_lock);
+}
+
+static void channel_hop_record_locked(uint8_t channel, uint8_t type, uint8_t subtype, int8_t rssi, size_t len)
+{
+    uint32_t pkt_count = 1;
+    uint32_t mgmt = (type == 0) ? 1 : 0;
+    uint32_t beacon = (type == 0 && subtype == 8) ? 1 : 0;
+    uint32_t data = (type == 2) ? 1 : 0;
+    channel_hopper_record_packet(channel, pkt_count, mgmt, beacon, data, rssi);
 }
 
 static void wifi_pkt_worker_task(void *arg)
@@ -437,35 +454,6 @@ static void wifi_promiscuous_cb(void *buf, wifi_promiscuous_pkt_type_t type)
         atomic_inc_u32(&g_wifi_queue_drop);
     }
 }
-
-static void channel_hopper_task(void *arg)
-{
-    watchdog_task_refresh("wifi_hopper");
-    uint32_t duration_sec = (uint32_t)(uintptr_t)arg;
-    int64_t end_us = esp_timer_get_time() + (int64_t)duration_sec * 1000000LL;
-    uint8_t current_channel = 1;
-
-    while (atomic_load(&g_wifi_sniffer_active)) {
-        uint8_t ch = atomic_load(&g_wifi_fixed_channel);
-        if (ch == 0) ch = current_channel;
-        esp_err_t ret = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-
-        if (ret == ESP_OK && atomic_load(&g_wifi_fixed_channel) == 0) {
-            current_channel = (current_channel % 13) + 1;
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(5));
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(60));
-
-        if (duration_sec != 0 && esp_timer_get_time() >= end_us) {
-            wifi_sniffer_stop();
-            break;
-        }
-    }
-    vTaskDelete(NULL);
-}
-
 static void wifi_clear_state_locked(void)
 {
     g_ap_count = 0;
@@ -473,6 +461,7 @@ static void wifi_clear_state_locked(void)
     memset(g_ap_list, 0, sizeof(g_ap_list));
     memset(g_client_list, 0, sizeof(g_client_list));
     memset(&g_wifi_stats, 0, sizeof(g_wifi_stats));
+    channel_hopper_init();
 }
 
 static esp_err_t wifi_sniffer_start_internal(uint32_t duration_sec, bool enable_pcap)
@@ -499,9 +488,19 @@ static esp_err_t wifi_sniffer_start_internal(uint32_t duration_sec, bool enable_
 
     led_set_state(LED_STATE_SCANNING);
 
-    if (xTaskCreatePinnedToCore(channel_hopper_task, "wifi_hopper", 3072, (void *)(uintptr_t)duration_sec, 5, NULL, 0) != pdPASS) {
-        wifi_sniffer_stop();
+    if (channel_hopper_init() != ESP_OK) {
+        atomic_store(&g_wifi_sniffer_active, false);
         return ESP_FAIL;
+    }
+    ch_hop_config_t cfg = {
+        .mode = CH_HOP_MODE_SEQUENTIAL,
+        .dwell_ms = 100,
+        .channel_mask = 0xFF
+    };
+    esp_err_t hop_ret = channel_hopper_start(&cfg);
+    if (hop_ret != ESP_OK) {
+        atomic_store(&g_wifi_sniffer_active, false);
+        return hop_ret;
     }
 
     ESP_LOGI(TAG, "Wi-Fi sniffer started, duration=%" PRIu32 " s", duration_sec);
@@ -597,6 +596,7 @@ void wifi_sniffer_stop(void)
         pcap_close();
     }
 
+    channel_hopper_stop();
     led_set_state(LED_STATE_IDLE);
     ESP_LOGI(TAG, "Wi-Fi sniffer stopped");
 }

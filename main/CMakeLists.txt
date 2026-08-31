@@ -1,6 +1,7 @@
 idf_component_register(SRCS "main.c"
                        "led_indicator.c"
                        "wifi_sniffer.c"
+                       "channel_hopper.c"
                        "ble_scanner.c"
                        "storage_sd.c"
                        "deauth_engine.c"
