@@ -26,6 +26,7 @@ bool wifi_sniffer_get_neighbors(const uint8_t *bssid, neighbor_entry_t *out, uin
 bool wifi_sniffer_get_rrm_btm(const uint8_t *bssid, bool *out_rrm, bool *out_btm);
 bool wifi_sniffer_get_mbssid(const uint8_t *bssid, bool *out_multi, bool *out_transmitted,
                              uint8_t *out_max_ind, uint8_t *out_idx);
+bool wifi_sniffer_get_he(const uint8_t *bssid, bool *out_he, uint8_t *out_mcs_nss, uint8_t *out_ppdu_type);
 void wifi_sniffer_clear_fixed_channel(void);
 void wifi_sniffer_print_clients_of_ap(const uint8_t *bssid);
 

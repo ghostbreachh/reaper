@@ -132,6 +132,28 @@ static bool parse_ssid_tag(const uint8_t *frame, size_t len, size_t offset, char
 //  Branch C — Deduplicate into separate ap_info_t entries
 //    Decision: REJECTED. Bloats AP table; better to keep primary BSSID and
 //    track profiles via neighbor list or separate BSSID table.
+
+// ============================================================================
+//  HE CAPABILITIES PARSING DECISION
+// ============================================================================
+//  Branch A — Full HE PHY/MAC capability bitmap parsing
+//    Decision: REJECTED. HE capability bitmap is 10+ bytes; parsing every
+//    bit wastes CPU on ESP32-S3 and produces unused state.
+//  Branch B — Parse HE MAC caps + PHY caps + MCS/NSS + PPDU type only
+//    Decision: ACCEPTED. Covers the actionable fields for attack decisions:
+//    NSS count tells us how many spatial streams, PPDU type tells us if AP
+//    supports MU-OFDMA. Stored compactly in ap_info_t.
+//  Branch C — Skip HE entirely, rely on VHT/HT as proxy
+//    Decision: REJECTED. WiFi 6/6E APs advertise HE, not VHT; skipping
+//    would misclassify modern APs as legacy.
+//  Branch A — Parse only transmitted BSSID, ignore nontransmitted
+//    Decision: REJECTED. Non-transmitted BSSIDs carry valid probe clients.
+//  Branch B — Parse and store all BSSIDs with transmitted/nontransmitted flags
+//    Decision: ACCEPTED. Full fidelity; BSSID index and MBI enable future
+//    deauth targeting of specific profiles in a multi-BSSID set.
+//  Branch C — Deduplicate into separate ap_info_t entries
+//    Decision: REJECTED. Bloats AP table; better to keep primary BSSID and
+//    track profiles via neighbor list or separate BSSID table.
 //  Branch A — Inline parser in wifi_sniffer.c, store in ap_info_t
 //    Decision: ACCEPTED. Fits existing static-helper style; no dynamic alloc.
 //  Branch B — Separate wifi_rrm.c/h module
@@ -254,7 +276,8 @@ static void add_ap_locked(const uint8_t *bssid, const char *ssid, int8_t rssi, u
                            bool wpa3_sae, uint8_t akm_count,
                            bool has_rrm, bool has_btm, const neighbor_entry_t *nbrs, uint8_t nbr_count,
                            bool is_multi_bssid, bool is_transmitted_bssid,
-                           uint8_t max_bssid_indicator, uint8_t bssid_index)
+                           uint8_t max_bssid_indicator, uint8_t bssid_index,
+                           bool he_capable, uint8_t he_mcs_nss, uint8_t he_ppdu_type)
 {
     if (!mac_is_valid_unicast(bssid)) return;
 
@@ -291,6 +314,11 @@ static void add_ap_locked(const uint8_t *bssid, const char *ssid, int8_t rssi, u
                 g_ap_list[i].max_bssid_indicator = max_bssid_indicator;
                 g_ap_list[i].bssid_index = bssid_index;
             }
+            if (he_capable) {
+                g_ap_list[i].he_capable = true;
+                g_ap_list[i].he_mcs_nss = he_mcs_nss;
+                g_ap_list[i].he_ppdu_type = he_ppdu_type;
+            }
             return;
         }
     }
@@ -323,6 +351,9 @@ static void add_ap_locked(const uint8_t *bssid, const char *ssid, int8_t rssi, u
         g_ap_list[g_ap_count].is_transmitted_bssid = is_transmitted_bssid;
         g_ap_list[g_ap_count].max_bssid_indicator = max_bssid_indicator;
         g_ap_list[g_ap_count].bssid_index = bssid_index;
+        g_ap_list[g_ap_count].he_capable = he_capable;
+        g_ap_list[g_ap_count].he_mcs_nss = he_mcs_nss;
+        g_ap_list[g_ap_count].he_ppdu_type = he_ppdu_type;
         g_ap_count++;
     }
 }
@@ -542,7 +573,9 @@ static void parse_wifi_packet(const wifi_pkt_msg_t *msg)
             bool has_btm = wifi_rrm_parse_btm(data + 24, len - 24);
             bool is_mbssid=false, is_trans=false; uint8_t max_ind=0, idx=0;
             wifi_mbssid_parse(data + 24, len - 24, &is_mbssid, &is_trans, &max_ind, &idx);
-            add_ap_locked(hdr->addr3, ssid, msg->rssi, msg->channel, pmf_cap, pmf_req, rsn_ver, wpa3, akm, has_rrm, has_btm, nbrs, nbr_count, is_mbssid, is_trans, max_ind, idx);
+            bool he_cap=false; uint8_t he_mcs_nss=0, he_ppdu=0;
+            wifi_he_parse(data + 24, len - 24, &he_cap, &he_mcs_nss, &he_ppdu);
+            add_ap_locked(hdr->addr3, ssid, msg->rssi, msg->channel, pmf_cap, pmf_req, rsn_ver, wpa3, akm, has_rrm, has_btm, nbrs, nbr_count, is_mbssid, is_trans, max_ind, idx, he_cap, he_mcs_nss, he_ppdu);
         } else if (subtype == 4) {
             g_wifi_stats.probe_req++;
             char ssid[33] = {0};
@@ -855,8 +888,8 @@ void wifi_sniffer_fprint(FILE *out)
     fprintf(out, "\n=============================================================\n");
     fprintf(out, "                  DISCOVERED ACCESS POINTS (%d)\n", g_ap_count);
     fprintf(out, "=============================================================\n");
-    fprintf(out, " #  | BSSID             | CH | RSSI | PKTS     | PMF       | RRM/BTM | NBR | MBSSID | SSID\n");
-    fprintf(out, "----+-------------------+----+------+----------+-----------+---------+-----+--------+-----------------\n");
+    fprintf(out, " #  | BSSID             | CH | RSSI | PKTS     | PMF       | RRM/BTM | NBR | MBSSID | HE  | SSID\n");
+    fprintf(out, "----+-------------------+----+------+----------+-----------+---------+-----+--------+-----+-----------------\n");
 
     for (int i = 0; i < g_ap_count; i++) {
         const char *pmf_str = "no";
@@ -870,11 +903,19 @@ void wifi_sniffer_fprint(FILE *out)
             if (g_ap_list[i].is_transmitted_bssid) snprintf(mbssid, sizeof(mbssid), "TX/%d", g_ap_list[i].bssid_index);
             else snprintf(mbssid, sizeof(mbssid), "NON/%d", g_ap_list[i].bssid_index);
         }
-        fprintf(out, "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-2d | %-4d | %-8" PRIu32 " | %-9s | %-7s | %-3d | %-6s | %s\n",
+        char he[8] = "-";
+        if (g_ap_list[i].he_capable) {
+            uint8_t nss = g_ap_list[i].he_mcs_nss & 0x0F;
+            uint8_t mcs = (g_ap_list[i].he_mcs_nss >> 4) & 0x0F;
+            if (g_ap_list[i].he_ppdu_type == 1) snprintf(he, sizeof(he), "MU-%d", nss);
+            else if (g_ap_list[i].he_ppdu_type == 2) snprintf(he, sizeof(he), "SU-%d", nss);
+            else snprintf(he, sizeof(he), "%dSS", nss);
+        }
+        fprintf(out, "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-2d | %-4d | %-8" PRIu32 " | %-9s | %-7s | %-3d | %-6s | %-4s | %s\n",
                 i + 1,
                 g_ap_list[i].bssid[0], g_ap_list[i].bssid[1], g_ap_list[i].bssid[2],
                 g_ap_list[i].bssid[3], g_ap_list[i].bssid[4], g_ap_list[i].bssid[5],
-                g_ap_list[i].channel, g_ap_list[i].rssi, g_ap_list[i].pkt_count, pmf_str, rrm_btm, g_ap_list[i].neighbor_count, mbssid, g_ap_list[i].ssid);
+                g_ap_list[i].channel, g_ap_list[i].rssi, g_ap_list[i].pkt_count, pmf_str, rrm_btm, g_ap_list[i].neighbor_count, mbssid, he, g_ap_list[i].ssid);
     }
 
     fprintf(out, "\n=============================================================\n");
@@ -962,6 +1003,26 @@ bool wifi_sniffer_get_mbssid(const uint8_t *bssid, bool *out_multi, bool *out_tr
             if (out_transmitted) *out_transmitted = g_ap_list[i].is_transmitted_bssid;
             if (out_max_ind) *out_max_ind = g_ap_list[i].max_bssid_indicator;
             if (out_idx) *out_idx = g_ap_list[i].bssid_index;
+            xSemaphoreGive(g_wifi_lock);
+            return true;
+        }
+    }
+    xSemaphoreGive(g_wifi_lock);
+    return false;
+}
+
+bool wifi_sniffer_get_he(const uint8_t *bssid, bool *out_he, uint8_t *out_mcs_nss, uint8_t *out_ppdu_type)
+{
+    if (bssid == NULL || out_he == NULL) return false;
+    *out_he = false;
+    if (out_mcs_nss) *out_mcs_nss = 0;
+    if (out_ppdu_type) *out_ppdu_type = 0;
+    xSemaphoreTake(g_wifi_lock, portMAX_DELAY);
+    for (int i = 0; i < g_ap_count; i++) {
+        if (memcmp(g_ap_list[i].bssid, bssid, 6) == 0) {
+            *out_he = g_ap_list[i].he_capable;
+            if (out_mcs_nss) *out_mcs_nss = g_ap_list[i].he_mcs_nss;
+            if (out_ppdu_type) *out_ppdu_type = g_ap_list[i].he_ppdu_type;
             xSemaphoreGive(g_wifi_lock);
             return true;
         }

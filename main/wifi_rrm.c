@@ -7,6 +7,7 @@ static const char *TAG = "wifi_rrm";
 
 #define IE_NEIGHBOR_REPORT  52
 #define IE_MBSSID          55
+#define IE_HE_CAPABILITIES 35
 #define NBR_MIN_LEN 15
 
 bool wifi_rrm_parse_beacon(const uint8_t *ies, size_t len,
@@ -72,6 +73,57 @@ bool wifi_mbssid_parse(const uint8_t *ies, size_t len,
             *out_max_bssid_ind = ies[pos + 2];
             *out_bssid_idx = ies[pos + 3];
             *out_transmitted = (ies[pos + 4] & 0x01) != 0;
+            return true;
+        }
+        pos += 2 + tag_len;
+    }
+    return false;
+}
+
+/* Parse HE Capabilities element (ID 35).
+ * Returns true if element present and at least MAC/PHY caps parsed.
+ * out_he_capable: true if HE capable
+ * out_mcs_nss:    bits 0-3 = NSS, bits 4-7 = MCS index
+ * out_ppdu_type:  0=unknown, 1=HE-MU, 2=HE-SU */
+bool wifi_he_parse(const uint8_t *ies, size_t len,
+                   bool *out_he_capable, uint8_t *out_mcs_nss, uint8_t *out_ppdu_type)
+{
+    if (ies == NULL || len == 0 || out_he_capable == NULL ||
+        out_mcs_nss == NULL || out_ppdu_type == NULL) return false;
+    *out_he_capable = false;
+    *out_mcs_nss = 0;
+    *out_ppdu_type = 0;
+
+    size_t pos = 0;
+    while (pos + 2 <= len) {
+        uint8_t tag_id = ies[pos];
+        uint8_t tag_len = ies[pos + 1];
+        if (pos + 2 + tag_len > len) break;
+
+        if (tag_id == IE_HE_CAPABILITIES && tag_len >= 4) {
+            /* HE MAC Capabilities Info at bytes 2-3 */
+            uint16_t he_mac = (uint16_t)(ies[pos + 2] | ((uint16_t)ies[pos + 3] << 8));
+
+            /* HE PHY Capabilities Info at bytes 4-5 */
+            uint16_t he_phy = (uint16_t)(ies[pos + 4] | ((uint16_t)ies[pos + 5] << 8));
+
+            /* Supported HE-MCS and NSS set at bytes 6-7 */
+            uint8_t mcs_nss = ies[pos + 6];
+
+            /* Determine PPDU type from PHY caps:
+             * Bit 1 = HE-SU PPDU capable
+             * Bit 2 = HE-ER-SU PPDU capable
+             * Bit 3 = HE-MU PPDU capable */
+            if (he_phy & 0x02) *out_ppdu_type = 2; /* HE-SU */
+            else if (he_phy & 0x08) *out_ppdu_type = 1; /* HE-MU */
+
+            /* Extract NSS: bits 0-3 of MCS/NSS field */
+            uint8_t nss = mcs_nss & 0x0F;
+            /* Extract MCS index: bits 4-7 */
+            uint8_t mcs = (mcs_nss >> 4) & 0x0F;
+
+            *out_he_capable = true;
+            *out_mcs_nss = ((mcs & 0x0F) << 4) | (nss & 0x0F);
             return true;
         }
         pos += 2 + tag_len;

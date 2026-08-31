@@ -16,6 +16,8 @@ bool wifi_rrm_capable(const uint8_t *frame, size_t len);
 bool wifi_mbssid_parse(const uint8_t *ies, size_t len,
                        bool *out_multi, bool *out_transmitted,
                        uint8_t *out_max_bssid_ind, uint8_t *out_bssid_idx);
+bool wifi_he_parse(const uint8_t *ies, size_t len,
+                   bool *out_he_capable, uint8_t *out_mcs_nss, uint8_t *out_ppdu_type);
 
 #ifdef __cplusplus
 }

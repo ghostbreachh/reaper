@@ -67,6 +67,10 @@ typedef struct {
     bool is_transmitted_bssid;
     uint8_t max_bssid_indicator;
     uint8_t bssid_index;
+    /* HE capabilities */
+    bool he_capable;
+    uint8_t he_mcs_nss; /* bit 0-3 = NSS, bit 4-7 = MCS */
+    uint8_t he_ppdu_type; /* 0=unknown, 1=he-mu, 2=he-su */
 } ap_info_t;
 
 typedef struct {
