@@ -26,6 +26,10 @@ bool ble_scanner_get_periodic(const uint8_t *mac,
                               uint16_t *out_interval_1_25ms,
                               uint8_t *out_sid);
 
+bool ble_scanner_get_phy(const uint8_t *mac,
+                          bool *out_coded, bool *out_coded_s8,
+                          bool *out_1m, bool *out_2m, bool *out_coded_supp);
+
 esp_err_t ble_advertise_start(const char *name, uint32_t duration_sec);
 esp_err_t ble_advertise_stop(void);
 

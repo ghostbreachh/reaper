@@ -157,6 +157,12 @@ typedef struct {
     bool sync_transfer_seen;
     uint16_t periodic_adv_interval; /* units of 1.25 ms, 0 = unknown */
     uint8_t sync_handle; /* advertising SID from ADI or sync info */
+    /* BT 5.0 coded PHY long-range */
+    bool phy_coded;       /* true if received on coded PHY */
+    bool phy_coded_s8;    /* true if specifically S=8 coding */
+    bool phy_1m;          /* received on 1M PHY */
+    bool phy_2m;          /* received on 2M PHY */
+    bool phy_coded_supported; /* advertiser claims coded PHY support */
 } ble_info_t;
 
 // ============================================================================

@@ -2,6 +2,7 @@
 #include "ble_scanner.h"
 #include "ble_ext_adv.h"
 #include "ble_periodic.h"
+#include "ble_phy.h"
 #include "led_indicator.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -24,6 +25,17 @@
 //    Decision: REJECTED. Raw parse is cheaper and keeps state local.
 
 // ============================================================================
+// ============================================================================
+//  CODED PHY S=8 LONG-RANGE SCANNING DECISION
+// ============================================================================
+//  Branch A — Parse coded-PHY flags only; no scan-config change
+//    Decision: REJECTED. Hardware must actually scan coded PHY or we miss
+//              long-range devices entirely.
+//  Branch B — Add PHY-aware scan config + parse coded-PHY indication
+//    Decision: ACCEPTED. Full end-to-end: config + parse + display.
+//  Branch C — Always scan 1M + coded; no user control
+//    Decision: REJECTED. Hidden default violates explicit-choice rule.
+
 //  PERIODIC ADVERTISING + SYNC TRANSFERS DECISION
 // ============================================================================
 //  Branch A — Periodic advertising stub; full sync deferred
@@ -114,7 +126,12 @@ static void add_or_update_ble_locked(
     bool has_sync_info,
     bool sync_transfer_seen,
     uint16_t periodic_adv_interval,
-    uint8_t sync_handle
+    uint8_t sync_handle,
+    bool phy_coded,
+    bool phy_coded_s8,
+    bool phy_1m,
+    bool phy_2m,
+    bool phy_coded_supported
 )
 {
     bool has_name = (name != NULL && name[0] != '\0');
@@ -150,6 +167,12 @@ static void add_or_update_ble_locked(
             );
             if (ext_adv_seen) g_ble_list[i].tracker_score++;
             if (periodic_adv_seen) g_ble_list[i].tracker_score++;
+            if (phy_coded_s8) g_ble_list[i].tracker_score++;
+            g_ble_list[i].phy_coded = phy_coded;
+            g_ble_list[i].phy_coded_s8 = phy_coded_s8;
+            g_ble_list[i].phy_1m = phy_1m;
+            g_ble_list[i].phy_2m = phy_2m;
+            g_ble_list[i].phy_coded_supported = phy_coded_supported;
 
             return;
         }
@@ -197,6 +220,12 @@ static void add_or_update_ble_locked(
         g_ble_list[g_ble_count].periodic_adv_interval = periodic_adv_interval;
         g_ble_list[g_ble_count].sync_handle = sync_handle;
         if (periodic_adv_seen) g_ble_list[g_ble_count].tracker_score++;
+        g_ble_list[g_ble_count].phy_coded = phy_coded;
+        g_ble_list[g_ble_count].phy_coded_s8 = phy_coded_s8;
+        g_ble_list[g_ble_count].phy_1m = phy_1m;
+        g_ble_list[g_ble_count].phy_2m = phy_2m;
+        g_ble_list[g_ble_count].phy_coded_supported = phy_coded_supported;
+        if (phy_coded_s8) g_ble_list[g_ble_count].tracker_score++;
 
         g_ble_count++;
     }
@@ -446,8 +475,8 @@ void ble_scanner_fprint(FILE *out)
     fprintf(out, "=========================================================================\n");
     fprintf(out, "                     DISCOVERED BLE DEVICES (%d)\n", g_ble_count);
     fprintf(out, "=========================================================================\n");
-    fprintf(out, " #  | BLE MAC           | TYPE    | RSSI | PKTS     | EXT ADV     | PA SYNC    | VENDOR      | DEVICE NAME\n");
-    fprintf(out, "----+-------------------+---------+------+----------+-------------+------------+-------------+-----------\n");
+    fprintf(out, " #  | BLE MAC           | TYPE    | RSSI | PKTS     | EXT ADV     | PA SYNC    | PHY       | VENDOR      | DEVICE NAME\n");
+    fprintf(out, "----+-------------------+---------+------+----------+-------------+------------+-----------+-------------+-----------\n");
 
     for (int i = 0; i < g_ble_count; i++) {
         char extadv[12] = "-";
@@ -469,9 +498,15 @@ void ble_scanner_fprint(FILE *out)
             else if (g_ble_list[i].has_sync_info) snprintf(pa_col, sizeof(pa_col), "PA");
             else snprintf(pa_col, sizeof(pa_col), "XFR");
         }
+        char phy_col[12] = "-";
+        if (g_ble_list[i].phy_coded_s8) snprintf(phy_col, sizeof(phy_col), "S8");
+        else if (g_ble_list[i].phy_coded) snprintf(phy_col, sizeof(phy_col), "S2");
+        else if (g_ble_list[i].phy_2m) snprintf(phy_col, sizeof(phy_col), "2M");
+        else if (g_ble_list[i].phy_1m) snprintf(phy_col, sizeof(phy_col), "1M");
+        else if (g_ble_list[i].phy_coded_supported) snprintf(phy_col, sizeof(phy_col), "coded");
         fprintf(
             out,
-            "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-7s | %-4d | %-8" PRIu32 " | %-11s | %-11s | %-11s | %s\n",
+            "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-7s | %-4d | %-8" PRIu32 " | %-11s | %-11s | %-9s | %-11s | %s\n",
             i + 1,
             g_ble_list[i].mac[5],
             g_ble_list[i].mac[4],
@@ -484,6 +519,7 @@ void ble_scanner_fprint(FILE *out)
             g_ble_list[i].pkt_count,
             extadv,
             pa_col,
+            phy_col,
             get_vendor_name(g_ble_list[i].mfg_id),
             g_ble_list[i].name
         );
@@ -575,6 +611,33 @@ bool ble_scanner_get_periodic(const uint8_t *mac,
             if (out_sync_transfer_seen) *out_sync_transfer_seen = g_ble_list[i].sync_transfer_seen;
             if (out_interval_1_25ms) *out_interval_1_25ms = g_ble_list[i].periodic_adv_interval;
             if (out_sid) *out_sid = g_ble_list[i].sync_handle;
+            xSemaphoreGive(g_ble_lock);
+            return true;
+        }
+    }
+    xSemaphoreGive(g_ble_lock);
+    return false;
+}
+
+bool ble_scanner_get_phy(const uint8_t *mac,
+                          bool *out_coded, bool *out_coded_s8,
+                          bool *out_1m, bool *out_2m, bool *out_coded_supp)
+{
+    if (mac == NULL || out_coded == NULL) return false;
+    *out_coded = false;
+    if (out_coded_s8) *out_coded_s8 = false;
+    if (out_1m) *out_1m = false;
+    if (out_2m) *out_2m = false;
+    if (out_coded_supp) *out_coded_supp = false;
+
+    xSemaphoreTake(g_ble_lock, portMAX_DELAY);
+    for (int i = 0; i < g_ble_count; i++) {
+        if (memcmp(g_ble_list[i].mac, mac, 6) == 0) {
+            *out_coded = g_ble_list[i].phy_coded;
+            if (out_coded_s8) *out_coded_s8 = g_ble_list[i].phy_coded_s8;
+            if (out_1m) *out_1m = g_ble_list[i].phy_1m;
+            if (out_2m) *out_2m = g_ble_list[i].phy_2m;
+            if (out_coded_supp) *out_coded_supp = g_ble_list[i].phy_coded_supported;
             xSemaphoreGive(g_ble_lock);
             return true;
         }
