@@ -283,6 +283,7 @@ static void run_init_sequence(void)
 
     /* ── 6. Wi-Fi stack ───────────────────────────────────────────────── */
     _init_row("Wi-Fi Subsystem  (802.11bgn promiscuous)",
+              coex_init(), false);
               wifi_sniffer_init(), false);
 
     /* ── 7. BLE stack ─────────────────────────────────────────────────── */

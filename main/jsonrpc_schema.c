@@ -37,6 +37,7 @@
 #include "wifi_sniffer.h"
 #include "cli_transport.h"
 #include "gps.h"
+#include "coex.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -130,6 +131,70 @@ static esp_err_t rpc_gps_status(const char *method, const char *params_json,
     cJSON_free((void *)json);
     cJSON_Delete(root);
     return rc;
+}
+
+/*============================================================================*/
+static esp_err_t rpc_coex_set_pref(const char *method, const char *params_json,
+                                  char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *pref = cJSON_GetObjectItem(root, "pref");
+    if (pref == NULL) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing pref", out, out_sz);
+    }
+
+    const char *pref_str = cJSON_GetStringValue(pref);
+    coex_pref_t p = COEX_PREF_BALANCE;
+    if (pref_str && strcmp(pref_str, "wifi") == 0) p = COEX_PREF_WIFI;
+    else if (pref_str && strcmp(pref_str, "ble") == 0) p = COEX_PREF_BLE;
+    else if (pref_str && strcmp(pref_str, "balance") == 0) p = COEX_PREF_BALANCE;
+    else {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "pref must be wifi|ble|balance", out, out_sz);
+    }
+
+    esp_err_t rc = coex_set_preference(p);
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "coex_set_preference failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+static esp_err_t rpc_coex_get_status(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = coex_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "coex status failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_coex_json(const char *method, const char *params_json,
+                               char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = coex_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "coex json failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
 }
 
 /*============================================================================*/
@@ -396,7 +461,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 8) return 0;
+    if (cap < 11) return 0;
     table[0].name = "system.ping";     table[0].fn = rpc_system_ping;     table[0].user_ctx = NULL;
     table[1].name = "system.info";     table[1].fn = rpc_system_info;     table[1].user_ctx = NULL;
     table[2].name = "system.caps";     table[2].fn = rpc_system_caps;     table[2].user_ctx = NULL;
@@ -405,7 +470,10 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[5].name = "gps.set_fix";     table[5].fn = rpc_gps_set_fix;     table[5].user_ctx = NULL;
     table[6].name = "gps.get_fix";     table[6].fn = rpc_gps_get_fix;     table[6].user_ctx = NULL;
     table[7].name = "gps.status";      table[7].fn = rpc_gps_status;      table[7].user_ctx = NULL;
-    return 8;
+    table[8].name = "coex.set_pref";   table[8].fn = rpc_coex_set_pref;   table[8].user_ctx = NULL;
+    table[9].name = "coex.get_status"; table[9].fn = rpc_coex_get_status; table[9].user_ctx = NULL;
+    table[10].name = "coex.json";      table[10].fn = rpc_coex_json;      table[10].user_ctx = NULL;
+    return 11;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)
