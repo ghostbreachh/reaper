@@ -30,6 +30,11 @@ bool ble_scanner_get_phy(const uint8_t *mac,
                           bool *out_coded, bool *out_coded_s8,
                           bool *out_1m, bool *out_2m, bool *out_coded_supp);
 
+bool ble_scanner_get_iso(const uint8_t *mac,
+                         bool *out_iso_seen, bool *out_has_big,
+                         uint8_t *out_iso_channels, uint8_t out_bis[4],
+                         uint32_t *out_interval_us);
+
 
 esp_err_t ble_advertise_start(const char *name, uint32_t duration_sec);
 esp_err_t ble_advertise_stop(void);

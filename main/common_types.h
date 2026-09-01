@@ -167,6 +167,12 @@ typedef struct {
     bool rpa_seen;            /* true if address looks like resolvable private */
     bool irk_hash_seen;       /* true if we saw a hash we can track */
     uint8_t irk_hash[3];      /* lower 3 bytes of RPA hash */
+    /* BT 5.2 ISO / isochronous channels */
+    bool iso_seen;            /* true if ISO/BIG-related data seen */
+    bool has_big_info;        /* true if Broadcast ISO event detected */
+    uint8_t iso_channels;     /* number of ISO channels advertised */
+    uint8_t bis_handles[4];   /* BIS handle array, max 4 */
+    uint32_t iso_interval_us; /* ISO interval in microseconds, 0=unknown */
 } ble_info_t;
 
 // ============================================================================

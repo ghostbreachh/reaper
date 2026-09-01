@@ -3,6 +3,7 @@
 #include "ble_ext_adv.h"
 #include "ble_periodic.h"
 #include "ble_phy.h"
+#include "ble_iso.h"
 #include "led_indicator.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -130,7 +131,12 @@ static void add_or_update_ble_locked(
     bool phy_coded_s8,
     bool phy_1m,
     bool phy_2m,
-    bool phy_coded_supported
+    bool phy_coded_supported,
+    bool iso_seen,
+    bool has_big_info,
+    uint8_t iso_channels,
+    const uint8_t bis_handles[4],
+    uint32_t iso_interval_us
 )
 {
     bool has_name = (name != NULL && name[0] != '\0');
@@ -172,6 +178,14 @@ static void add_or_update_ble_locked(
             g_ble_list[i].phy_1m = phy_1m;
             g_ble_list[i].phy_2m = phy_2m;
             g_ble_list[i].phy_coded_supported = phy_coded_supported;
+            g_ble_list[i].iso_seen = iso_seen;
+            g_ble_list[i].has_big_info = has_big_info;
+            g_ble_list[i].iso_channels = iso_channels;
+            if (bis_handles) {
+                memcpy(g_ble_list[i].bis_handles, bis_handles, 4);
+            }
+            g_ble_list[i].iso_interval_us = iso_interval_us;
+            if (iso_seen) g_ble_list[i].tracker_score++;
 
             return;
         }
@@ -225,6 +239,14 @@ static void add_or_update_ble_locked(
         g_ble_list[g_ble_count].phy_2m = phy_2m;
         g_ble_list[g_ble_count].phy_coded_supported = phy_coded_supported;
         if (phy_coded_s8) g_ble_list[g_ble_count].tracker_score++;
+        g_ble_list[g_ble_count].iso_seen = iso_seen;
+        g_ble_list[g_ble_count].has_big_info = has_big_info;
+        g_ble_list[g_ble_count].iso_channels = iso_channels;
+        if (bis_handles) {
+            memcpy(g_ble_list[g_ble_count].bis_handles, bis_handles, 4);
+        }
+        g_ble_list[g_ble_count].iso_interval_us = iso_interval_us;
+        if (iso_seen) g_ble_list[g_ble_count].tracker_score++;
 
         g_ble_count++;
     }
@@ -294,6 +316,18 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                     periodic_seen = true;
                 }
             }
+            bool iso_seen=false, has_big=false;
+            uint8_t iso_channels=0;
+            uint8_t bis_handles[4]={0};
+            uint32_t iso_interval=0;
+            if (event->disc.data != NULL && event->disc.length_data > 0) {
+                ble_iso_parse(
+                    event->disc.data,
+                    event->disc.length_data,
+                    &has_big, &iso_channels, bis_handles, &iso_interval
+                );
+                iso_seen = has_big;
+            }
             add_or_update_ble_locked(
                 event->disc.addr.val,
                 event->disc.addr.type,
@@ -301,7 +335,9 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                 event->disc.rssi,
                 mfg_id,
                 ext_adv, aux_ptr, adi, adv_mode, scan_rsp, tx_power,
-                periodic_seen, sync_info, sync_xfer, pa_interval, pa_sid
+                periodic_seen, sync_info, sync_xfer, pa_interval, pa_sid,
+                phy_coded, phy_s8, phy_1m, phy_2m, phy_coded_supp,
+                iso_seen, has_big, iso_channels, bis_handles, iso_interval
             );
 
 
@@ -381,6 +417,9 @@ esp_err_t ble_scanner_init(void)
 
     /* GATT client subsystem */
     ble_gattc_init();
+
+    /* ISO/BIG prep subsystem */
+    ble_iso_init();
 
     ESP_LOGI(TAG, "BLE scanner initialized");
     return ESP_OK;
@@ -477,8 +516,8 @@ void ble_scanner_fprint(FILE *out)
     fprintf(out, "=========================================================================\n");
     fprintf(out, "                     DISCOVERED BLE DEVICES (%d)\n", g_ble_count);
     fprintf(out, "=========================================================================\n");
-    fprintf(out, " #  | BLE MAC           | TYPE    | RSSI | PKTS     | EXT ADV     | PA SYNC    | PHY       | VENDOR      | DEVICE NAME\n");
-    fprintf(out, "----+-------------------+---------+------+----------+-------------+------------+-----------+-------------+-----------\n");
+    fprintf(out, " #  | BLE MAC           | TYPE    | RSSI | PKTS     | EXT ADV     | PA SYNC    | PHY       | ISO        | VENDOR      | DEVICE NAME\n");
+    fprintf(out, "----+-------------------+---------+------+----------+-------------+------------+-----------+------------+-------------+-----------\n");
 
     for (int i = 0; i < g_ble_count; i++) {
         char extadv[12] = "-";
@@ -506,9 +545,14 @@ void ble_scanner_fprint(FILE *out)
         else if (g_ble_list[i].phy_2m) snprintf(phy_col, sizeof(phy_col), "2M");
         else if (g_ble_list[i].phy_1m) snprintf(phy_col, sizeof(phy_col), "1M");
         else if (g_ble_list[i].phy_coded_supported) snprintf(phy_col, sizeof(phy_col), "coded");
+        char iso_col[12] = "-";
+        if (g_ble_list[i].iso_seen) {
+            if (g_ble_list[i].has_big_info) snprintf(iso_col, sizeof(iso_col), "BIG");
+            else snprintf(iso_col, sizeof(iso_col), "ISO");
+        }
         fprintf(
             out,
-            "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-7s | %-4d | %-8" PRIu32 " | %-11s | %-11s | %-9s | %-11s | %s\n",
+            "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-7s | %-4d | %-8" PRIu32 " | %-11s | %-11s | %-9s | %-10s | %-11s | %s\n",
             i + 1,
             g_ble_list[i].mac[5],
             g_ble_list[i].mac[4],
@@ -522,6 +566,7 @@ void ble_scanner_fprint(FILE *out)
             extadv,
             pa_col,
             phy_col,
+            iso_col,
             get_vendor_name(g_ble_list[i].mfg_id),
             g_ble_list[i].name
         );
@@ -640,6 +685,34 @@ bool ble_scanner_get_phy(const uint8_t *mac,
             if (out_1m) *out_1m = g_ble_list[i].phy_1m;
             if (out_2m) *out_2m = g_ble_list[i].phy_2m;
             if (out_coded_supp) *out_coded_supp = g_ble_list[i].phy_coded_supported;
+            xSemaphoreGive(g_ble_lock);
+            return true;
+        }
+    }
+    xSemaphoreGive(g_ble_lock);
+    return false;
+}
+
+bool ble_scanner_get_iso(const uint8_t *mac,
+                         bool *out_iso_seen, bool *out_has_big,
+                         uint8_t *out_iso_channels, uint8_t out_bis[4],
+                         uint32_t *out_interval_us)
+{
+    if (mac == NULL || out_iso_seen == NULL) return false;
+    *out_iso_seen = false;
+    if (out_has_big) *out_has_big = false;
+    if (out_iso_channels) *out_iso_channels = 0;
+    if (out_bis) memset(out_bis, 0, 4);
+    if (out_interval_us) *out_interval_us = 0;
+
+    xSemaphoreTake(g_ble_lock, portMAX_DELAY);
+    for (int i = 0; i < g_ble_count; i++) {
+        if (memcmp(g_ble_list[i].mac, mac, 6) == 0) {
+            *out_iso_seen = g_ble_list[i].iso_seen;
+            if (out_has_big) *out_has_big = g_ble_list[i].has_big_info;
+            if (out_iso_channels) *out_iso_channels = g_ble_list[i].iso_channels;
+            if (out_bis) memcpy(out_bis, g_ble_list[i].bis_handles, 4);
+            if (out_interval_us) *out_interval_us = g_ble_list[i].iso_interval_us;
             xSemaphoreGive(g_ble_lock);
             return true;
         }
