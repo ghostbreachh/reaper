@@ -29,6 +29,7 @@ typedef struct {
     ch_hop_mode_t mode;
     uint16_t dwell_ms;            /* 10..30000 ms; 0 means default 100 ms */
     uint8_t  channel_mask;        /* bit0=ch1 .. bit12=ch13; 0xFF = all */
+    uint32_t dwell_us;            /* override: microsecond dwell; 0=use dwell_ms */
 } ch_hop_config_t;
 
 /*
@@ -52,6 +53,17 @@ esp_err_t channel_hopper_stop(void);
  * Query whether the hopper task is currently active.
  */
 bool channel_hopper_is_active(void);
+
+/*
+ * Set microsecond dwell override.
+ * If us > 0, this overrides dwell_ms for sub-millisecond precision.
+ */
+esp_err_t channel_hopper_set_dwell_us(uint32_t us);
+
+/*
+ * Get current microsecond dwell setting.
+ */
+uint32_t channel_hopper_get_dwell_us(void);
 
 /*
  * Retrieve statistics for a single 1..13 channel.

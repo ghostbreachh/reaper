@@ -104,6 +104,7 @@ static void channel_hopper_task(void *arg)
     watchdog_task_refresh("ch_hopper");
 
     uint16_t dwell_ms = g_hop_cfg.dwell_ms ? g_hop_cfg.dwell_ms : 100;
+    uint32_t dwell_us = g_hop_cfg.dwell_us ? g_hop_cfg.dwell_us : 0;
     uint8_t mask = g_hop_cfg.channel_mask ? g_hop_cfg.channel_mask : 0xFF;
     uint8_t current = next_channel(0, mask);
 
@@ -126,7 +127,18 @@ static void channel_hopper_task(void *arg)
         g_channel_enter_us = esp_timer_get_time();
         xSemaphoreGive(g_hop_mutex);
 
-        vTaskDelay(pdMS_TO_TICKS(dwell_ms));
+        /* Use microsecond dwell if configured, otherwise millisecond */
+        if (dwell_us > 0) {
+            uint64_t start_us = esp_timer_get_time();
+            while (atomic_load(&g_hop_active)) {
+                uint64_t elapsed = esp_timer_get_time() - start_us;
+                if (elapsed >= dwell_us) break;
+                /* Yield briefly to avoid watchdog starvation */
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(dwell_ms));
+        }
 
         if (!atomic_load(&g_hop_active)) break;
 
@@ -186,6 +198,28 @@ esp_err_t channel_hopper_start(const ch_hop_config_t *cfg)
              (unsigned)cfg->dwell_ms,
              (unsigned)cfg->channel_mask);
     return ESP_OK;
+}
+
+esp_err_t channel_hopper_set_dwell_us(uint32_t us)
+{
+    if (us > 0 && us < 1000) {
+        /* Sub-millisecond dwell requires esp_timer path */
+        g_hop_cfg.dwell_us = us;
+        g_hop_cfg.dwell_ms = 0;
+    } else {
+        /* Millisecond or default */
+        g_hop_cfg.dwell_us = 0;
+        if (us >= 1000) {
+            g_hop_cfg.dwell_ms = (uint16_t)(us / 1000);
+        }
+    }
+    ESP_LOGI(TAG, "dwell_us set to %u", (unsigned)us);
+    return ESP_OK;
+}
+
+uint32_t channel_hopper_get_dwell_us(void)
+{
+    return g_hop_cfg.dwell_us ? g_hop_cfg.dwell_us : (uint32_t)g_hop_cfg.dwell_ms * 1000;
 }
 
 esp_err_t channel_hopper_stop(void)
