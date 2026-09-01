@@ -9,6 +9,7 @@
 #include "ble_ext_adv.h"
 #include "ble_periodic.h"
 #include "ble_phy.h"
+#include "ble_gatt_client.h"
 #include "storage_sd.h"
 #include "deauth_engine.h"
 #include "handshake_crack.h"

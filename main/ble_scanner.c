@@ -25,7 +25,6 @@
 //    Decision: REJECTED. Raw parse is cheaper and keeps state local.
 
 // ============================================================================
-// ============================================================================
 //  CODED PHY S=8 LONG-RANGE SCANNING DECISION
 // ============================================================================
 //  Branch A — Parse coded-PHY flags only; no scan-config change
@@ -379,6 +378,9 @@ esp_err_t ble_scanner_init(void)
 
     /* Periodic advertising subsystem */
     ble_periodic_init();
+
+    /* GATT client subsystem */
+    ble_gattc_init();
 
     ESP_LOGI(TAG, "BLE scanner initialized");
     return ESP_OK;
