@@ -163,6 +163,10 @@ typedef struct {
     bool phy_1m;          /* received on 1M PHY */
     bool phy_2m;          /* received on 2M PHY */
     bool phy_coded_supported; /* advertiser claims coded PHY support */
+    /* BLE privacy / RPA */
+    bool rpa_seen;            /* true if address looks like resolvable private */
+    bool irk_hash_seen;       /* true if we saw a hash we can track */
+    uint8_t irk_hash[3];      /* lower 3 bytes of RPA hash */
 } ble_info_t;
 
 // ============================================================================
