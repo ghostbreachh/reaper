@@ -288,6 +288,8 @@ static void run_init_sequence(void)
     /* ── 7. BLE stack ─────────────────────────────────────────────────── */
     _init_row("BLE 5.0 Scanner  (NimBLE host)",
               ble_scanner_init(), false);
+              _init_row("GPS Timestamp Correlator",
+                        gps_init(), false);
 
     /* ── 8. ARP poison engine ─────────────────────────────────────────── */
     _init_row("ARP Poison Engine  (MITM + relay)",

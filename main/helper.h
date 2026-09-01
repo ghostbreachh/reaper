@@ -10,6 +10,7 @@
 #include "ble_periodic.h"
 #include "ble_phy.h"
 #include "ble_iso.h"
+#include "gps.h"
 #include "ble_gatt_client.h"
 #include "storage_sd.h"
 #include "deauth_engine.h"

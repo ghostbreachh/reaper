@@ -296,4 +296,20 @@ typedef struct {
     int64_t time_us;
 } cred_hit_t;
 
+/* ============================================================================
+ *  SECTION 9: GPS / TIMESTAMP CORRELATION
+ * ============================================================================
+ */
+
+typedef struct {
+    bool valid;
+    double latitude;
+    double longitude;
+    double altitude;
+    double speed_knots;
+    uint32_t timestamp; /* Unix epoch from GPS */
+    uint8_t sat_count;
+    uint8_t fix_quality; /* 0=none, 1=GPS, 2=DGPS */
+} gps_fix_t;
+
 #endif // COMMON_TYPES_H
