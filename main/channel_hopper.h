@@ -22,7 +22,8 @@ extern "C" {
 typedef enum {
     CH_HOP_MODE_SEQUENTIAL = 0,
     CH_HOP_MODE_RANDOM     = 1,
-    CH_HOP_MODE_RSSI_OPT   = 2
+    CH_HOP_MODE_RSSI_OPT   = 2,
+    CH_HOP_MODE_ADAPTIVE   = 3
 } ch_hop_mode_t;
 
 typedef struct {
@@ -31,6 +32,16 @@ typedef struct {
     uint8_t  channel_mask;        /* bit0=ch1 .. bit12=ch13; 0xFF = all */
     uint32_t dwell_us;            /* override: microsecond dwell; 0=use dwell_ms */
 } ch_hop_config_t;
+
+typedef struct {
+    uint32_t pkt_count;
+    uint32_t beacon_count;
+    uint32_t mgmt_count;
+    uint32_t data_count;
+    int32_t  rssi_sum;
+    uint32_t rssi_samples;
+    uint32_t adaptive_dwell_ms; /* current adaptive dwell for this channel */
+} ch_hop_stats_t;
 
 /*
  * Initialize channel hopper state.
@@ -64,6 +75,8 @@ esp_err_t channel_hopper_set_dwell_us(uint32_t us);
  * Get current microsecond dwell setting.
  */
 uint32_t channel_hopper_get_dwell_us(void);
+
+uint32_t channel_hopper_adaptive_dwell(uint8_t channel);
 
 /*
  * Retrieve statistics for a single 1..13 channel.

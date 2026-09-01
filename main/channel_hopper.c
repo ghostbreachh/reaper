@@ -142,7 +142,13 @@ static void channel_hopper_task(void *arg)
 
         if (!atomic_load(&g_hop_active)) break;
 
-        if (g_hop_cfg.mode == CH_HOP_MODE_RANDOM) {
+        if (g_hop_cfg.mode == CH_HOP_MODE_ADAPTIVE) {
+            current = next_channel(current, mask);
+            uint32_t adaptive_dwell = channel_hopper_adaptive_dwell(current);
+            if (adaptive_dwell > 0) {
+                dwell_ms = adaptive_dwell;
+            }
+        } else if (g_hop_cfg.mode == CH_HOP_MODE_RANDOM) {
             current = random_channel(mask);
         } else if (g_hop_cfg.mode == CH_HOP_MODE_RSSI_OPT) {
             /* Pick channel with best average RSSI among top candidates */
@@ -198,6 +204,22 @@ esp_err_t channel_hopper_start(const ch_hop_config_t *cfg)
              (unsigned)cfg->dwell_ms,
              (unsigned)cfg->channel_mask);
     return ESP_OK;
+}
+
+uint32_t channel_hopper_adaptive_dwell(uint8_t channel)
+{
+    if (channel == 0 || channel > 13) return 0;
+    if (g_hop_mutex == NULL) return 0;
+
+    xSemaphoreTake(g_hop_mutex, portMAX_DELAY);
+    ch_hop_stats_t *s = &g_hop_stats[channel];
+    uint32_t adaptive = s->adaptive_dwell_ms;
+    xSemaphoreGive(g_hop_mutex);
+
+    if (adaptive > 0) {
+        return adaptive;
+    }
+    return g_hop_cfg.dwell_ms ? g_hop_cfg.dwell_ms : 100;
 }
 
 esp_err_t channel_hopper_set_dwell_us(uint32_t us)
@@ -266,6 +288,16 @@ esp_err_t channel_hopper_record_packet(uint8_t channel,
         s->rssi_sum += (int32_t)rssi;
         s->rssi_samples++;
     }
+
+    /* Adaptive dwell adjustment */
+    if (s->pkt_count > 20) {
+        s->adaptive_dwell_ms = (s->adaptive_dwell_ms < 200)
+            ? s->adaptive_dwell_ms + 20 : s->adaptive_dwell_ms;
+    } else if (s->pkt_count == 0 && s->adaptive_dwell_ms > 10) {
+        s->adaptive_dwell_ms = s->adaptive_dwell_ms / 2;
+        if (s->adaptive_dwell_ms < 10) s->adaptive_dwell_ms = 10;
+    }
+
     xSemaphoreGive(g_hop_mutex);
 
     return ESP_OK;
@@ -318,13 +350,15 @@ int channel_hopper_json(char *buf, size_t bufsz)
         first = false;
         written += snprintf(buf + written, bufsz - (size_t)written,
                             "{\"ch\":%u,\"pkts\":%u,\"beacons\":%u,"
-                            "\"mgmt\":%u,\"data\":%u,\"rssi_avg\":%d}",
+                            "\"mgmt\":%u,\"data\":%u,\"rssi_avg\":%d,"
+                            "\"adaptive_dwell\":%u}",
                             (unsigned)ch,
                             (unsigned)s->pkt_count,
                             (unsigned)s->beacon_count,
                             (unsigned)s->mgmt_count,
                             (unsigned)s->data_count,
-                            (int)avg_rssi);
+                            (int)avg_rssi,
+                            (unsigned)s->adaptive_dwell_ms);
     }
 
     written += snprintf(buf + written, bufsz - (size_t)written, "]}");
@@ -346,19 +380,20 @@ void channel_hopper_print_summary(void)
            g_hop_cfg.mode == CH_HOP_MODE_RSSI_OPT ? "rssi_opt" : "sequential",
            (unsigned)g_hop_cfg.dwell_ms);
     printf(" Mask: 0x%02X\n", (unsigned)g_hop_cfg.channel_mask);
-    printf(" CH | PKTS | BEACONS | MGMT  | DATA  | RSSI_AVG\n");
+    printf(" CH | PKTS | BEACONS | MGMT  | DATA  | RSSI_AVG | ADAPT\n");
     printf("----+-------+---------+-------+-------+----------\n");
 
     for (uint8_t ch = 1; ch <= 13; ch++) {
         ch_hop_stats_t *s = &g_hop_stats[ch];
         int32_t avg = s->rssi_samples ? (s->rssi_sum / (int32_t)s->rssi_samples) : 0;
-        printf(" %-2u | %5u | %7u | %5u | %5u | %8d\n",
+        printf(" %-2u | %5u | %7u | %5u | %5u | %8d | %5u\n",
                ch,
                (unsigned)s->pkt_count,
                (unsigned)s->beacon_count,
                (unsigned)s->mgmt_count,
                (unsigned)s->data_count,
-               (int)avg);
+               (int)avg,
+               (unsigned)s->adaptive_dwell_ms);
     }
     xSemaphoreGive(g_hop_mutex);
     printf("=================================\n");
