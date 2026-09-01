@@ -36,11 +36,101 @@
 #include "nvs_persist.h"
 #include "wifi_sniffer.h"
 #include "cli_transport.h"
+#include "gps.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
 
 #define SCHEMA_VERSION "v1.0.0"
+
+/*============================================================================*/
+static esp_err_t rpc_gps_set_fix(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    gps_fix_t fix;
+    memset(&fix, 0, sizeof(fix));
+
+    cJSON *lat = cJSON_GetObjectItem(root, "lat");
+    cJSON *lon = cJSON_GetObjectItem(root, "lon");
+    cJSON *alt = cJSON_GetObjectItem(root, "alt");
+    cJSON *sats = cJSON_GetObjectItem(root, "sats");
+    cJSON *fix_q = cJSON_GetObjectItem(root, "fix");
+    cJSON *ts = cJSON_GetObjectItem(root, "timestamp");
+
+    if (cJSON_IsNumber(lat)) fix.latitude = cJSON_GetNumberValue(lat);
+    if (cJSON_IsNumber(lon)) fix.longitude = cJSON_GetNumberValue(lon);
+    if (cJSON_IsNumber(alt)) fix.altitude = cJSON_GetNumberValue(alt);
+    if (cJSON_IsNumber(sats)) fix.sat_count = (uint8_t)cJSON_GetNumberValue(sats);
+    if (cJSON_IsNumber(fix_q)) fix.fix_quality = (uint8_t)cJSON_GetNumberValue(fix_q);
+    if (cJSON_IsNumber(ts)) fix.timestamp = (uint32_t)cJSON_GetNumberValue(ts);
+
+    fix.valid = (fix.latitude != 0.0 || fix.longitude != 0.0) &&
+                fix.fix_quality >= 1 && fix.sat_count >= 3;
+
+    esp_err_t rc = gps_set_fix(&fix);
+    cJSON_Delete(root);
+
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "gps_set_fix failed", out, out_sz);
+    }
+
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+static esp_err_t rpc_gps_get_fix(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    gps_fix_t fix;
+    bool valid = gps_get_fix(&fix);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "valid", valid);
+    cJSON_AddNumberToObject(root, "lat", fix.latitude);
+    cJSON_AddNumberToObject(root, "lon", fix.longitude);
+    cJSON_AddNumberToObject(root, "alt", fix.altitude);
+    cJSON_AddNumberToObject(root, "sats", fix.sat_count);
+    cJSON_AddNumberToObject(root, "fix", fix.fix_quality);
+    cJSON_AddNumberToObject(root, "timestamp", fix.timestamp);
+
+    const char *json = cJSON_PrintUnformatted(root);
+    esp_err_t rc = jsonrpc_send_result(-1, json, out, out_sz);
+    cJSON_free((void *)json);
+    cJSON_Delete(root);
+    return rc;
+}
+
+static esp_err_t rpc_gps_status(const char *method, const char *params_json,
+                                char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    cJSON *root = cJSON_CreateObject();
+
+    bool valid = gps_is_valid();
+    cJSON_AddBoolToObject(root, "valid", valid);
+    cJSON_AddStringToObject(root, "source", valid ? "phone" : "none");
+    cJSON_AddNumberToObject(root, "timestamp", gps_get_timestamp_us() / 1000000ULL);
+
+    gps_fix_t fix;
+    if (gps_get_fix(&fix)) {
+        cJSON_AddNumberToObject(root, "lat", fix.latitude);
+        cJSON_AddNumberToObject(root, "lon", fix.longitude);
+    }
+
+    const char *json = cJSON_PrintUnformatted(root);
+    esp_err_t rc = jsonrpc_send_result(-1, json, out, out_sz);
+    cJSON_free((void *)json);
+    cJSON_Delete(root);
+    return rc;
+}
 
 /*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
@@ -306,13 +396,16 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 5) return 0;
+    if (cap < 8) return 0;
     table[0].name = "system.ping";     table[0].fn = rpc_system_ping;     table[0].user_ctx = NULL;
     table[1].name = "system.info";     table[1].fn = rpc_system_info;     table[1].user_ctx = NULL;
     table[2].name = "system.caps";     table[2].fn = rpc_system_caps;     table[2].user_ctx = NULL;
     table[3].name = "system.health";   table[3].fn = rpc_system_health;   table[3].user_ctx = NULL;
     table[4].name = "system.crash";    table[4].fn = rpc_system_crash;    table[4].user_ctx = NULL;
-    return 5;
+    table[5].name = "gps.set_fix";     table[5].fn = rpc_gps_set_fix;     table[5].user_ctx = NULL;
+    table[6].name = "gps.get_fix";     table[6].fn = rpc_gps_get_fix;     table[6].user_ctx = NULL;
+    table[7].name = "gps.status";      table[7].fn = rpc_gps_status;      table[7].user_ctx = NULL;
+    return 8;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

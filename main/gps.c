@@ -3,10 +3,11 @@
  *  GPS TIMESTAMP CORRELATION
  * ============================================================================
  *
- *  Branch A — Full NMEA parser with all sentence types
- *    Decision: REJECTED. Overkill; GGA is sufficient for fix + timestamp.
- *  Branch B — Minimal GGA-only parser
- *    Decision: ACCEPTED. Small footprint, covers lat/lon/alt/sats/fix.
+ *  Branch A — UART GPS only, no external input
+ *    Decision: REJECTED. Phone GPS via JSON-RPC is primary; ESP has no GPS.
+ *  Branch B — Phone-first GPS via JSON-RPC, optional UART fallback
+ *    Decision: ACCEPTED. Phone provides fix via RPC; UART GPS still works
+ *              if module attached. One unified gps_fix_t store.
  *  Branch C — External GPS library
  *    Decision: REJECTED. No external dependency policy; keep it inline.
  */
@@ -176,6 +177,17 @@ esp_err_t gps_init(void)
     g_gps_mutex = xSemaphoreCreateMutex();
     if (g_gps_mutex == NULL) return ESP_ERR_NO_MEM;
 
+    g_gps_init_done = true;
+    ESP_LOGI(TAG, "GPS subsystem initialized (UART optional)");
+    return ESP_OK;
+}
+
+esp_err_t gps_start(void)
+{
+    if (!g_gps_init_done) return ESP_ERR_INVALID_STATE;
+    if (atomic_load(&g_gps_running)) return ESP_OK;
+
+    /* Try optional UART GPS module; fail soft if no hardware */
     uart_config_t uart_cfg = {
         .baud_rate = GPS_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
@@ -186,33 +198,34 @@ esp_err_t gps_init(void)
     };
 
     esp_err_t ret = uart_param_config(GPS_UART_NUM, &uart_cfg);
-    if (ret != ESP_OK) return ret;
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "No UART GPS hardware; phone GPS via RPC only");
+        return ESP_OK;
+    }
 
     ret = uart_set_pin(GPS_UART_NUM, UART_PIN_NO_CHANGE, GPIO_NUM_19, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    if (ret != ESP_OK) return ret;
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "UART GPS pins unavailable; phone GPS via RPC only");
+        return ESP_OK;
+    }
 
     ret = uart_driver_install(GPS_UART_NUM, GPS_RX_BUF_SIZE, 0, 0, NULL, 0);
-    if (ret != ESP_OK) return ret;
-
-    g_gps_init_done = true;
-    ESP_LOGI(TAG, "GPS initialized on UART%d @ %d baud", GPS_UART_NUM, GPS_BAUD_RATE);
-    return ESP_OK;
-}
-
-esp_err_t gps_start(void)
-{
-    if (!g_gps_init_done) return ESP_ERR_INVALID_STATE;
-    if (atomic_load(&g_gps_running)) return ESP_OK;
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "UART GPS driver failed; phone GPS via RPC only");
+        return ESP_OK;
+    }
 
     atomic_store(&g_gps_running, true);
     BaseType_t rc = xTaskCreatePinnedToCore(gps_task, "gps_task", GPS_TASK_STACK, NULL, GPS_TASK_PRIO, &g_gps_task, GPS_TASK_CORE);
     if (rc != pdPASS) {
         atomic_store(&g_gps_running, false);
         g_gps_task = NULL;
-        return ESP_FAIL;
+        uart_driver_delete(GPS_UART_NUM);
+        ESP_LOGW(TAG, "GPS task create failed; phone GPS via RPC only");
+        return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "GPS task started");
+    ESP_LOGI(TAG, "GPS UART task started on UART%d", GPS_UART_NUM);
     return ESP_OK;
 }
 
@@ -226,6 +239,8 @@ esp_err_t gps_stop(void)
         g_gps_task = NULL;
     }
 
+    /* UART driver may not be installed if no GPS module was present */
+    uart_driver_delete(GPS_UART_NUM);
     ESP_LOGI(TAG, "GPS task stopped");
     return ESP_OK;
 }
@@ -258,6 +273,16 @@ bool gps_is_valid(void)
     bool valid = g_gps_fix.valid;
     xSemaphoreGive(g_gps_mutex);
     return valid;
+}
+
+esp_err_t gps_set_fix(const gps_fix_t *fix)
+{
+    if (fix == NULL || g_gps_mutex == NULL) return ESP_ERR_INVALID_ARG;
+
+    xSemaphoreTake(g_gps_mutex, portMAX_DELAY);
+    g_gps_fix = *fix;
+    xSemaphoreGive(g_gps_mutex);
+    return ESP_OK;
 }
 
 int gps_format_coords(char *buf, size_t bufsz, const gps_fix_t *fix)

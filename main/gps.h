@@ -30,6 +30,8 @@ int gps_format_coords(char *buf, size_t bufsz, const gps_fix_t *fix);
 /* Check whether GPS has a valid fix. */
 bool gps_is_valid(void);
 
+esp_err_t gps_set_fix(const gps_fix_t *fix);
+
 #ifdef __cplusplus
 }
 #endif
