@@ -41,5 +41,6 @@
 #include "ai_fingerprint.h"
 #include "ai_channel_predictor.h"
 #include "ai_handshake_quality.h"
+#include "ai_rogue_detector.h"
 
 #endif // HELPER_H

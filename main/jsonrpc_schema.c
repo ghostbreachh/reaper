@@ -44,6 +44,7 @@
 #include "ai_fingerprint.h"
 #include "ai_channel_predictor.h"
 #include "ai_handshake_quality.h"
+#include "ai_rogue_detector.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -757,6 +758,38 @@ static esp_err_t rpc_ai_hs_test(const char *method, const char *params_json,
 }
 
 /*============================================================================*/
+static esp_err_t rpc_ai_rogue_scan(const char *method, const char *params_json,
+                                   char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = ai_rogue_detector_scan();
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "rogue scan failed", out, out_sz);
+    }
+    char buf[512];
+    rc = ai_rogue_detector_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "rogue json failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_ai_rogue_alerts(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[512];
+    esp_err_t rc = ai_rogue_detector_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "rogue alerts failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -1020,7 +1053,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 32) return 0;
+    if (cap < 34) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -1053,7 +1086,9 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[29].name = "ai.hs.stats";     table[29].fn = rpc_ai_hs_stats;      table[29].user_ctx = NULL;
     table[30].name = "ai.hs.set_model"; table[30].fn = rpc_ai_hs_set_model;   table[30].user_ctx = NULL;
     table[31].name = "ai.hs.test";      table[31].fn = rpc_ai_hs_test;        table[31].user_ctx = NULL;
-    return 32;
+    table[32].name = "ai.rogue.scan";   table[32].fn = rpc_ai_rogue_scan;    table[32].user_ctx = NULL;
+    table[33].name = "ai.rogue.alerts"; table[33].fn = rpc_ai_rogue_alerts;  table[33].user_ctx = NULL;
+    return 34;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

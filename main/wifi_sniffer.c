@@ -3,6 +3,7 @@
 #include "ai_anomaly.h"
 #include "ai_fingerprint.h"
 #include "ai_channel_predictor.h"
+#include "ai_rogue_detector.h"
 #include "wifi_sniffer.h"
 #include "led_indicator.h"
 #include "storage_sd.h"
@@ -600,6 +601,7 @@ static void parse_wifi_packet(const wifi_pkt_msg_t *msg)
             add_ap_locked(hdr->addr3, ssid, msg->rssi, msg->channel, pmf_cap, pmf_req, rsn_ver, wpa3, akm, has_rrm, has_btm, nbrs, nbr_count, is_mbssid, is_trans, max_ind, idx, he_cap, he_mcs_nss, he_ppdu, regdom, country_code, reg_class, max_tx);
             ai_fp_result_t fp_res;
             ai_fingerprint_classify(data + 24, len - 24, subtype, hdr->addr3, &fp_res);
+            ai_rogue_detector_scan();
         } else if (subtype == 4) {
             g_wifi_stats.probe_req++;
             char ssid[33] = {0};
@@ -680,6 +682,7 @@ static void wifi_pkt_worker_task(void *arg)
                     ai_classify_result_t cls_res;
                     ai_classifier_predict(msg.payload, msg.len, &cls_res);
                     ai_anomaly_feed(msg.rssi, msg.len, msg.tv.tv_sec * 1000000ULL + msg.tv.tv_usec);
+                    ai_rogue_detector_scan();
                     if (atomic_load(&g_arp_poison_active)) {
                         arp_feed_packet(msg.payload, msg.len);
                         arp_relay_frame(msg.payload, msg.len);
