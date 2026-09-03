@@ -1,6 +1,7 @@
 #include "channel_hopper.h"
 #include "ai_classifier.h"
 #include "ai_anomaly.h"
+#include "ai_fingerprint.h"
 #include "wifi_sniffer.h"
 #include "led_indicator.h"
 #include "storage_sd.h"
@@ -596,6 +597,8 @@ static void parse_wifi_packet(const wifi_pkt_msg_t *msg)
             bool regdom=false; uint8_t reg_class=0, max_tx=0;
             wifi_country_parse(data + 24, len - 24, country_code, sizeof(country_code), &reg_class, &max_tx);
             add_ap_locked(hdr->addr3, ssid, msg->rssi, msg->channel, pmf_cap, pmf_req, rsn_ver, wpa3, akm, has_rrm, has_btm, nbrs, nbr_count, is_mbssid, is_trans, max_ind, idx, he_cap, he_mcs_nss, he_ppdu, regdom, country_code, reg_class, max_tx);
+            ai_fp_result_t fp_res;
+            ai_fingerprint_classify(data + 24, len - 24, subtype, hdr->addr3, &fp_res);
         } else if (subtype == 4) {
             g_wifi_stats.probe_req++;
             char ssid[33] = {0};
@@ -604,12 +607,16 @@ static void parse_wifi_packet(const wifi_pkt_msg_t *msg)
             uint16_t rsn_ver2=0;
             pmf_parse_rsn(data + 12, len - 12, &pmf_cap2, &pmf_req2, &rsn_ver2, NULL, NULL);
             add_client_locked(hdr->addr2, NULL, msg->rssi, msg->channel);
+            ai_fp_result_t fp_res;
+            ai_fingerprint_classify(data + 12, len - 12, subtype, hdr->addr2, &fp_res);
         } else if (subtype == 12) {
             g_wifi_stats.deauth++;
         } else if (subtype == 10) {
             g_wifi_stats.disassoc++;
         } else {
             add_client_locked(hdr->addr2, NULL, msg->rssi, msg->channel);
+            ai_fp_result_t fp_res;
+            ai_fingerprint_classify(data + 12, len - 12, subtype, hdr->addr2, &fp_res);
         }
     } else if (type == 2) {
         g_wifi_stats.total_data++;

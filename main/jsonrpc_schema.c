@@ -41,6 +41,7 @@
 #include "ai_model.h"
 #include "ai_classifier.h"
 #include "ai_anomaly.h"
+#include "ai_fingerprint.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -467,6 +468,109 @@ static esp_err_t rpc_ai_anomaly_stats(const char *method, const char *params_jso
 }
 
 /*============================================================================*/
+static esp_err_t rpc_ai_fp_set_model(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (name == NULL || !cJSON_IsString(name)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing name", out, out_sz);
+    }
+
+    esp_err_t rc = ai_fingerprint_set_model(cJSON_GetStringValue(name));
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "set_model failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+static esp_err_t rpc_ai_fp_stats(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = ai_fingerprint_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "fp stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_ai_fp_test(const char *method, const char *params_json,
+                                char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *ie_hex = cJSON_GetObjectItem(root, "ie");
+    cJSON *subtype_item = cJSON_GetObjectItem(root, "subtype");
+    cJSON *oui_item = cJSON_GetObjectItem(root, "oui");
+    if (ie_hex == NULL || !cJSON_IsString(ie_hex) ||
+        subtype_item == NULL || !cJSON_IsNumber(subtype_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing ie or subtype", out, out_sz);
+    }
+
+    const char *ie_str = cJSON_GetStringValue(ie_hex);
+    size_t ie_hex_len = strlen(ie_str);
+    uint8_t ie_buf[256];
+    size_t ie_len = 0;
+    for (size_t i = 0; i < ie_hex_len && ie_len < sizeof(ie_buf); i += 2) {
+        unsigned int byte = 0;
+        if (sscanf(ie_str + i, "%02x", &byte) == 1) {
+            ie_buf[ie_len++] = (uint8_t)byte;
+        }
+    }
+
+    uint8_t oui[3] = {0};
+    if (oui_item && cJSON_IsArray(oui_item)) {
+        int cnt = cJSON_GetArraySize(oui_item);
+        for (int i = 0; i < 3 && i < cnt; i++) {
+            cJSON *item = cJSON_GetArrayItem(oui_item, i);
+            if (cJSON_IsNumber(item)) oui[i] = (uint8_t)cJSON_GetNumberValue(item);
+        }
+    }
+
+    ai_fp_result_t res;
+    esp_err_t rc = ai_fingerprint_classify(ie_buf, ie_len,
+                                           (uint8_t)cJSON_GetNumberValue(subtype_item),
+                                           oui, &res);
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "classify failed", out, out_sz);
+    }
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "class", ai_fingerprint_class_name(res.cls));
+    cJSON_AddStringToObject(r, "label", res.label);
+    cJSON_AddNumberToObject(r, "inference_us", res.inference_us);
+    cJSON_AddBoolToObject(r, "model_loaded", res.model_loaded);
+
+    const char *json = cJSON_PrintUnformatted(r);
+    esp_err_t r2 = jsonrpc_send_result(-1, json, out, out_sz);
+    cJSON_free((void *)json);
+    cJSON_Delete(r);
+    return r2;
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -730,7 +834,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 21) return 0;
+    if (cap < 24) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -752,7 +856,10 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[18].name = "ai.anomaly.set_model"; table[18].fn = rpc_ai_anomaly_set_model; table[18].user_ctx = NULL;
     table[19].name = "ai.anomaly.set_threshold"; table[19].fn = rpc_ai_anomaly_set_threshold; table[19].user_ctx = NULL;
     table[20].name = "ai.anomaly.stats"; table[20].fn = rpc_ai_anomaly_stats; table[20].user_ctx = NULL;
-    return 21;
+    table[21].name = "ai.fp.set_model"; table[21].fn = rpc_ai_fp_set_model;   table[21].user_ctx = NULL;
+    table[22].name = "ai.fp.stats";     table[22].fn = rpc_ai_fp_stats;       table[22].user_ctx = NULL;
+    table[23].name = "ai.fp.test";      table[23].fn = rpc_ai_fp_test;        table[23].user_ctx = NULL;
+    return 24;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

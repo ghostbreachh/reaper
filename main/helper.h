@@ -38,5 +38,6 @@
 #include "ai_model.h"
 #include "ai_classifier.h"
 #include "ai_anomaly.h"
+#include "ai_fingerprint.h"
 
 #endif // HELPER_H

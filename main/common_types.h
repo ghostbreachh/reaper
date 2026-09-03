@@ -76,6 +76,15 @@ typedef struct {
     char country_code[3]; /* "US", "EU", "JP", etc. */
     uint8_t reg_class;
     uint8_t max_tx_power;
+    /* AI device fingerprinting */
+    bool fp_done;
+    uint8_t fp_oui[3];
+    uint8_t fp_rates[8];
+    uint8_t fp_rate_count;
+    uint8_t fp_ext_cap[8];
+    uint8_t fp_ext_cap_len;
+    uint8_t fp_class; /* 0=unknown, 1=phone, 2=laptop, 3=iot, 4=ap, 5=router */
+    char fp_label[32];
 } ap_info_t;
 
 typedef struct {
