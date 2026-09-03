@@ -35,5 +35,6 @@
 #include "usb_cdc.h"
 #include "wifi_rrm.h"
 #include "coex.h"
+#include "ai_model.h"
 
 #endif // HELPER_H

@@ -38,6 +38,7 @@
 #include "cli_transport.h"
 #include "gps.h"
 #include "coex.h"
+#include "ai_model.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -193,6 +194,117 @@ static esp_err_t rpc_coex_json(const char *method, const char *params_json,
     if (rc != ESP_OK) {
         return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
                                   "coex json failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+/*============================================================================*/
+static esp_err_t rpc_ai_load(const char *method, const char *params_json,
+                             char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (name == NULL || !cJSON_IsString(name)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing name", out, out_sz);
+    }
+
+    esp_err_t rc = ai_model_zoo_load(cJSON_GetStringValue(name));
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "ai_model_zoo_load failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"loaded\"", out, out_sz);
+}
+
+static esp_err_t rpc_ai_unload(const char *method, const char *params_json,
+                               char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (name == NULL || !cJSON_IsString(name)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing name", out, out_sz);
+    }
+
+    esp_err_t rc = ai_model_zoo_unload(cJSON_GetStringValue(name));
+    cJSON_Delete(root);
+    if (rc != ESP_OK && rc != ESP_ERR_NOT_FOUND) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "ai_model_zoo_unload failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"unloaded\"", out, out_sz);
+}
+
+static esp_err_t rpc_ai_infer(const char *method, const char *params_json,
+                              char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    cJSON *input = cJSON_GetObjectItem(root, "input");
+    if (name == NULL || !cJSON_IsString(name) ||
+        input == NULL || !cJSON_IsString(input)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing name or input", out, out_sz);
+    }
+
+    const char *input_str = cJSON_GetStringValue(input);
+    size_t input_len = strlen(input_str);
+    uint8_t output[256];
+    size_t out_len = 0;
+
+    esp_err_t rc = ai_model_zoo_infer(cJSON_GetStringValue(name),
+                                      input_str, input_len,
+                                      output, sizeof(output), &out_len);
+    cJSON_Delete(root);
+    if (rc == ESP_ERR_NOT_SUPPORTED) {
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddStringToObject(r, "status", "stub");
+        cJSON_AddStringToObject(r, "note", "link ESP-DL to enable inference");
+        const char *json = cJSON_PrintUnformatted(r);
+        esp_err_t r2 = jsonrpc_send_result(-1, json, out, out_sz);
+        cJSON_free((void *)json);
+        cJSON_Delete(r);
+        return r2;
+    }
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "inference failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+static esp_err_t rpc_ai_list(const char *method, const char *params_json,
+                             char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[512];
+    esp_err_t rc = ai_model_zoo_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "ai list failed", out, out_sz);
     }
     return jsonrpc_send_result(-1, buf, out, out_sz);
 }
@@ -461,7 +573,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 11) return 0;
+    if (cap < 15) return 0;
     table[0].name = "system.ping";     table[0].fn = rpc_system_ping;     table[0].user_ctx = NULL;
     table[1].name = "system.info";     table[1].fn = rpc_system_info;     table[1].user_ctx = NULL;
     table[2].name = "system.caps";     table[2].fn = rpc_system_caps;     table[2].user_ctx = NULL;
@@ -473,7 +585,11 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[8].name = "coex.set_pref";   table[8].fn = rpc_coex_set_pref;   table[8].user_ctx = NULL;
     table[9].name = "coex.get_status"; table[9].fn = rpc_coex_get_status; table[9].user_ctx = NULL;
     table[10].name = "coex.json";      table[10].fn = rpc_coex_json;      table[10].user_ctx = NULL;
-    return 11;
+    table[11].name = "ai.model.load";  table[11].fn = rpc_ai_load;        table[11].user_ctx = NULL;
+    table[12].name = "ai.model.unload";table[12].fn = rpc_ai_unload;      table[12].user_ctx = NULL;
+    table[13].name = "ai.model.infer"; table[13].fn = rpc_ai_infer;       table[13].user_ctx = NULL;
+    table[14].name = "ai.model.list";  table[14].fn = rpc_ai_list;        table[14].user_ctx = NULL;
+    return 15;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)
