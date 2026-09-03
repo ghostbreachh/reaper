@@ -287,6 +287,7 @@ static void run_init_sequence(void)
               ai_classifier_init(), false);
               ai_anomaly_init(), false);
               ai_fingerprint_init(), false);
+              ai_channel_predictor_init(), false);
               coex_init(), false);
               wifi_sniffer_init(), false);
 

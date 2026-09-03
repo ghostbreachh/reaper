@@ -42,6 +42,7 @@
 #include "ai_classifier.h"
 #include "ai_anomaly.h"
 #include "ai_fingerprint.h"
+#include "ai_channel_predictor.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -571,6 +572,83 @@ static esp_err_t rpc_ai_fp_test(const char *method, const char *params_json,
 }
 
 /*============================================================================*/
+static esp_err_t rpc_ai_channel_predict(const char *method, const char *params_json,
+                                        char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    ai_channel_predict_t pred;
+    esp_err_t rc = ai_channel_predictor_predict(&pred);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "predict failed", out, out_sz);
+    }
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "channel", pred.best_channel);
+    cJSON_AddNumberToObject(r, "confidence", pred.confidence);
+    cJSON_AddNumberToObject(r, "history", pred.history_count);
+    cJSON_AddBoolToObject(r, "model_loaded", pred.model_loaded);
+    cJSON_AddNumberToObject(r, "inference_us", pred.inference_us);
+
+    const char *json = cJSON_PrintUnformatted(r);
+    esp_err_t r2 = jsonrpc_send_result(-1, json, out, out_sz);
+    cJSON_free((void *)json);
+    cJSON_Delete(r);
+    return r2;
+}
+
+static esp_err_t rpc_ai_channel_stats(const char *method, const char *params_json,
+                                      char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = ai_channel_predictor_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "channel stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_ai_channel_record(const char *method, const char *params_json,
+                                       char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = ai_channel_predictor_record();
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "record failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"recorded\"", out, out_sz);
+}
+
+static esp_err_t rpc_ai_channel_set_model(const char *method, const char *params_json,
+                                          char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (name == NULL || !cJSON_IsString(name)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing name", out, out_sz);
+    }
+
+    esp_err_t rc = ai_channel_predictor_set_model(cJSON_GetStringValue(name));
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "set_model failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -834,7 +912,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 24) return 0;
+    if (cap < 28) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -859,7 +937,11 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[21].name = "ai.fp.set_model"; table[21].fn = rpc_ai_fp_set_model;   table[21].user_ctx = NULL;
     table[22].name = "ai.fp.stats";     table[22].fn = rpc_ai_fp_stats;       table[22].user_ctx = NULL;
     table[23].name = "ai.fp.test";      table[23].fn = rpc_ai_fp_test;        table[23].user_ctx = NULL;
-    return 24;
+    table[24].name = "ai.channel.predict"; table[24].fn = rpc_ai_channel_predict; table[24].user_ctx = NULL;
+    table[25].name = "ai.channel.stats"; table[25].fn = rpc_ai_channel_stats; table[25].user_ctx = NULL;
+    table[26].name = "ai.channel.record"; table[26].fn = rpc_ai_channel_record; table[26].user_ctx = NULL;
+    table[27].name = "ai.channel.set_model"; table[27].fn = rpc_ai_channel_set_model; table[27].user_ctx = NULL;
+    return 28;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

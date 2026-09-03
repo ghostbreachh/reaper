@@ -2,6 +2,7 @@
 #include "ai_classifier.h"
 #include "ai_anomaly.h"
 #include "ai_fingerprint.h"
+#include "ai_channel_predictor.h"
 #include "wifi_sniffer.h"
 #include "led_indicator.h"
 #include "storage_sd.h"
@@ -647,6 +648,7 @@ static void parse_wifi_packet(const wifi_pkt_msg_t *msg)
 
     if (channel_hopper_is_active()) {
         channel_hop_record_locked(msg->channel, type, subtype, msg->rssi, len);
+        ai_channel_predictor_record();
     }
 
     xSemaphoreGive(g_wifi_lock);

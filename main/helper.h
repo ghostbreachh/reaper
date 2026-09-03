@@ -39,5 +39,6 @@
 #include "ai_classifier.h"
 #include "ai_anomaly.h"
 #include "ai_fingerprint.h"
+#include "ai_channel_predictor.h"
 
 #endif // HELPER_H
