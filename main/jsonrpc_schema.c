@@ -43,6 +43,7 @@
 #include "ai_anomaly.h"
 #include "ai_fingerprint.h"
 #include "ai_channel_predictor.h"
+#include "ai_handshake_quality.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -649,6 +650,113 @@ static esp_err_t rpc_ai_channel_set_model(const char *method, const char *params
 }
 
 /*============================================================================*/
+static esp_err_t rpc_ai_hs_score(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    ai_hs_quality_t q;
+    esp_err_t rc = ai_hs_quality_score(&q);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "score failed", out, out_sz);
+    }
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "score", q.score);
+    cJSON_AddNumberToObject(r, "factors", q.factors);
+    cJSON_AddNumberToObject(r, "m1", q.m1_count);
+    cJSON_AddNumberToObject(r, "m2", q.m2_count);
+    cJSON_AddNumberToObject(r, "rssi", q.rssi);
+    cJSON_AddBoolToObject(r, "complete", q.complete);
+    cJSON_AddBoolToObject(r, "anonce", q.has_anonce);
+    cJSON_AddBoolToObject(r, "snonce", q.has_snonce);
+    cJSON_AddBoolToObject(r, "mic", q.has_mic);
+    cJSON_AddBoolToObject(r, "pmkid", q.has_pmkid);
+
+    const char *json = cJSON_PrintUnformatted(r);
+    esp_err_t r2 = jsonrpc_send_result(-1, json, out, out_sz);
+    cJSON_free((void *)json);
+    cJSON_Delete(r);
+    return r2;
+}
+
+static esp_err_t rpc_ai_hs_stats(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = ai_hs_quality_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "hs stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_ai_hs_set_model(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (name == NULL || !cJSON_IsString(name)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing name", out, out_sz);
+    }
+
+    esp_err_t rc = ai_hs_quality_set_model(cJSON_GetStringValue(name));
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "set_model failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+static esp_err_t rpc_ai_hs_test(const char *method, const char *params_json,
+                                char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *score_val = cJSON_GetObjectItem(root, "score");
+    if (score_val == NULL || !cJSON_IsNumber(score_val)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing score", out, out_sz);
+    }
+
+    ai_hs_quality_t q;
+    memset(&q, 0, sizeof(q));
+    q.score = (float)cJSON_GetNumberValue(score_val);
+    if (q.score > 1.0f) q.score = 1.0f;
+    if (q.score < 0.0f) q.score = 0.0f;
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "score", q.score);
+    cJSON_AddStringToObject(r, "verdict",
+        q.score > 0.7f ? "high" :
+        q.score > 0.4f ? "medium" : "low");
+
+    const char *json = cJSON_PrintUnformatted(r);
+    esp_err_t r2 = jsonrpc_send_result(-1, json, out, out_sz);
+    cJSON_free((void *)json);
+    cJSON_Delete(r);
+    cJSON_Delete(root);
+    return r2;
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -912,7 +1020,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 28) return 0;
+    if (cap < 32) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -941,7 +1049,11 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[25].name = "ai.channel.stats"; table[25].fn = rpc_ai_channel_stats; table[25].user_ctx = NULL;
     table[26].name = "ai.channel.record"; table[26].fn = rpc_ai_channel_record; table[26].user_ctx = NULL;
     table[27].name = "ai.channel.set_model"; table[27].fn = rpc_ai_channel_set_model; table[27].user_ctx = NULL;
-    return 28;
+    table[28].name = "ai.hs.score";     table[28].fn = rpc_ai_hs_score;      table[28].user_ctx = NULL;
+    table[29].name = "ai.hs.stats";     table[29].fn = rpc_ai_hs_stats;      table[29].user_ctx = NULL;
+    table[30].name = "ai.hs.set_model"; table[30].fn = rpc_ai_hs_set_model;   table[30].user_ctx = NULL;
+    table[31].name = "ai.hs.test";      table[31].fn = rpc_ai_hs_test;        table[31].user_ctx = NULL;
+    return 32;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

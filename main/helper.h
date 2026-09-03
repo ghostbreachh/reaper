@@ -40,5 +40,6 @@
 #include "ai_anomaly.h"
 #include "ai_fingerprint.h"
 #include "ai_channel_predictor.h"
+#include "ai_handshake_quality.h"
 
 #endif // HELPER_H
