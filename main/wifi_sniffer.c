@@ -443,6 +443,24 @@ bool wifi_sniffer_get_security(const uint8_t *bssid, bool *out_pmf_required, boo
     return false;
 }
 
+bool wifi_sniffer_get_rssi(const uint8_t *bssid, int8_t *out_rssi)
+{
+    if (bssid == NULL || out_rssi == NULL) return false;
+    *out_rssi = -100;
+    if (g_wifi_lock == NULL) return false;
+
+    xSemaphoreTake(g_wifi_lock, portMAX_DELAY);
+    for (int i = 0; i < g_ap_count; i++) {
+        if (memcmp(g_ap_list[i].bssid, bssid, 6) == 0) {
+            *out_rssi = g_ap_list[i].rssi;
+            xSemaphoreGive(g_wifi_lock);
+            return true;
+        }
+    }
+    xSemaphoreGive(g_wifi_lock);
+    return false;
+}
+
 void wifi_sniffer_get_ssid_for_bssid(const uint8_t *bssid, char *out_ssid, size_t max_len)
 {
     if (bssid == NULL || out_ssid == NULL || max_len == 0) return;
