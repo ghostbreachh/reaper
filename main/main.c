@@ -290,6 +290,7 @@ static void run_init_sequence(void)
               ai_channel_predictor_init(), false);
               ai_hs_quality_init(), false);
               ai_rogue_detector_init(), false);
+              ai_deauth_predictor_init(), false);
               coex_init(), false);
               wifi_sniffer_init(), false);
 

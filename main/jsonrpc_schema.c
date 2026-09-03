@@ -45,6 +45,7 @@
 #include "ai_channel_predictor.h"
 #include "ai_handshake_quality.h"
 #include "ai_rogue_detector.h"
+#include "ai_deauth_predictor.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -790,6 +791,104 @@ static esp_err_t rpc_ai_rogue_alerts(const char *method, const char *params_json
 }
 
 /*============================================================================*/
+static esp_err_t rpc_ai_deauth_predict(const char *method, const char *params_json,
+                                       char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *idx_item = cJSON_GetObjectItem(root, "idx");
+    if (idx_item == NULL || !cJSON_IsNumber(idx_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing idx", out, out_sz);
+    }
+
+    uint8_t idx = (uint8_t)cJSON_GetNumberValue(idx_item);
+    ai_deauth_prediction_t pred;
+    esp_err_t rc = ai_deauth_predictor_predict(idx, &pred);
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "predict failed", out, out_sz);
+    }
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "idx", pred.target_index);
+    cJSON_AddNumberToObject(r, "probability", pred.probability);
+    cJSON_AddNumberToObject(r, "flags", pred.flags);
+    cJSON_AddBoolToObject(r, "model_loaded", pred.model_loaded);
+    cJSON_AddNumberToObject(r, "inference_us", pred.inference_us);
+
+    const char *json = cJSON_PrintUnformatted(r);
+    esp_err_t r2 = jsonrpc_send_result(-1, json, out, out_sz);
+    cJSON_free((void *)json);
+    cJSON_Delete(r);
+    return r2;
+}
+
+static esp_err_t rpc_ai_deauth_predict_all(const char *method, const char *params_json,
+                                           char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = ai_deauth_predictor_predict_all();
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "predict_all failed", out, out_sz);
+    }
+    char buf[512];
+    rc = ai_deauth_predictor_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "json failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_ai_deauth_stats(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = ai_deauth_predictor_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "deauth stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_ai_deauth_set_model(const char *method, const char *params_json,
+                                         char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (name == NULL || !cJSON_IsString(name)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing name", out, out_sz);
+    }
+
+    esp_err_t rc = ai_deauth_predictor_set_model(cJSON_GetStringValue(name));
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "set_model failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -1053,7 +1152,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 34) return 0;
+    if (cap < 38) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -1088,7 +1187,11 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[31].name = "ai.hs.test";      table[31].fn = rpc_ai_hs_test;        table[31].user_ctx = NULL;
     table[32].name = "ai.rogue.scan";   table[32].fn = rpc_ai_rogue_scan;    table[32].user_ctx = NULL;
     table[33].name = "ai.rogue.alerts"; table[33].fn = rpc_ai_rogue_alerts;  table[33].user_ctx = NULL;
-    return 34;
+    table[34].name = "ai.deauth.predict"; table[34].fn = rpc_ai_deauth_predict; table[34].user_ctx = NULL;
+    table[35].name = "ai.deauth.predict_all"; table[35].fn = rpc_ai_deauth_predict_all; table[35].user_ctx = NULL;
+    table[36].name = "ai.deauth.stats"; table[36].fn = rpc_ai_deauth_stats; table[36].user_ctx = NULL;
+    table[37].name = "ai.deauth.set_model"; table[37].fn = rpc_ai_deauth_set_model; table[37].user_ctx = NULL;
+    return 38;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

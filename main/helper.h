@@ -42,5 +42,6 @@
 #include "ai_channel_predictor.h"
 #include "ai_handshake_quality.h"
 #include "ai_rogue_detector.h"
+#include "ai_deauth_predictor.h"
 
 #endif // HELPER_H
