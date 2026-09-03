@@ -39,6 +39,7 @@
 #include "gps.h"
 #include "coex.h"
 #include "ai_model.h"
+#include "ai_classifier.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -310,6 +311,95 @@ static esp_err_t rpc_ai_list(const char *method, const char *params_json,
 }
 
 /*============================================================================*/
+static esp_err_t rpc_ai_classify_test(const char *method, const char *params_json,
+                                      char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *frame_hex = cJSON_GetObjectItem(root, "frame");
+    if (frame_hex == NULL || !cJSON_IsString(frame_hex)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing frame hex", out, out_sz);
+    }
+
+    const char *hex = cJSON_GetStringValue(frame_hex);
+    size_t hex_len = strlen(hex);
+    uint8_t frame[AI_CLASSIFIER_INPUT_MAX];
+    size_t frame_len = 0;
+    for (size_t i = 0; i < hex_len && frame_len < sizeof(frame); i += 2) {
+        unsigned int byte = 0;
+        if (sscanf(hex + i, "%02x", &byte) == 1) {
+            frame[frame_len++] = (uint8_t)byte;
+        }
+    }
+
+    ai_classify_result_t res;
+    esp_err_t rc = ai_classifier_predict(frame, frame_len, &res);
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "classify failed", out, out_sz);
+    }
+
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "class", ai_classifier_class_name(res.cls));
+    cJSON_AddNumberToObject(r, "confidence", res.confidence);
+    cJSON_AddNumberToObject(r, "inference_us", res.inference_us);
+    cJSON_AddBoolToObject(r, "model_loaded", res.model_loaded);
+
+    const char *json = cJSON_PrintUnformatted(r);
+    esp_err_t r2 = jsonrpc_send_result(-1, json, out, out_sz);
+    cJSON_free((void *)json);
+    cJSON_Delete(r);
+    return r2;
+}
+
+static esp_err_t rpc_ai_classify_stats(const char *method, const char *params_json,
+                                       char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = ai_classifier_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "classify stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_ai_classify_set_model(const char *method, const char *params_json,
+                                           char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (name == NULL || !cJSON_IsString(name)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing name", out, out_sz);
+    }
+
+    esp_err_t rc = ai_classifier_set_model(cJSON_GetStringValue(name));
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "set_model failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -573,23 +663,26 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 15) return 0;
-    table[0].name = "system.ping";     table[0].fn = rpc_system_ping;     table[0].user_ctx = NULL;
-    table[1].name = "system.info";     table[1].fn = rpc_system_info;     table[1].user_ctx = NULL;
-    table[2].name = "system.caps";     table[2].fn = rpc_system_caps;     table[2].user_ctx = NULL;
-    table[3].name = "system.health";   table[3].fn = rpc_system_health;   table[3].user_ctx = NULL;
-    table[4].name = "system.crash";    table[4].fn = rpc_system_crash;    table[4].user_ctx = NULL;
-    table[5].name = "gps.set_fix";     table[5].fn = rpc_gps_set_fix;     table[5].user_ctx = NULL;
-    table[6].name = "gps.get_fix";     table[6].fn = rpc_gps_get_fix;     table[6].user_ctx = NULL;
-    table[7].name = "gps.status";      table[7].fn = rpc_gps_status;      table[7].user_ctx = NULL;
-    table[8].name = "coex.set_pref";   table[8].fn = rpc_coex_set_pref;   table[8].user_ctx = NULL;
-    table[9].name = "coex.get_status"; table[9].fn = rpc_coex_get_status; table[9].user_ctx = NULL;
-    table[10].name = "coex.json";      table[10].fn = rpc_coex_json;      table[10].user_ctx = NULL;
-    table[11].name = "ai.model.load";  table[11].fn = rpc_ai_load;        table[11].user_ctx = NULL;
-    table[12].name = "ai.model.unload";table[12].fn = rpc_ai_unload;      table[12].user_ctx = NULL;
-    table[13].name = "ai.model.infer"; table[13].fn = rpc_ai_infer;       table[13].user_ctx = NULL;
-    table[14].name = "ai.model.list";  table[14].fn = rpc_ai_list;        table[14].user_ctx = NULL;
-    return 15;
+    if (cap < 18) return 0;
+    table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
+    table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
+    table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
+    table[3].name = "system.health";    table[3].fn = rpc_system_health;    table[3].user_ctx = NULL;
+    table[4].name = "system.crash";     table[4].fn = rpc_system_crash;     table[4].user_ctx = NULL;
+    table[5].name = "gps.set_fix";      table[5].fn = rpc_gps_set_fix;      table[5].user_ctx = NULL;
+    table[6].name = "gps.get_fix";      table[6].fn = rpc_gps_get_fix;      table[6].user_ctx = NULL;
+    table[7].name = "gps.status";       table[7].fn = rpc_gps_status;       table[7].user_ctx = NULL;
+    table[8].name = "coex.set_pref";    table[8].fn = rpc_coex_set_pref;    table[8].user_ctx = NULL;
+    table[9].name = "coex.get_status";  table[9].fn = rpc_coex_get_status;  table[9].user_ctx = NULL;
+    table[10].name = "coex.json";       table[10].fn = rpc_coex_json;       table[10].user_ctx = NULL;
+    table[11].name = "ai.model.load";   table[11].fn = rpc_ai_load;         table[11].user_ctx = NULL;
+    table[12].name = "ai.model.unload"; table[12].fn = rpc_ai_unload;       table[12].user_ctx = NULL;
+    table[13].name = "ai.model.infer";  table[13].fn = rpc_ai_infer;        table[13].user_ctx = NULL;
+    table[14].name = "ai.model.list";   table[14].fn = rpc_ai_list;         table[14].user_ctx = NULL;
+    table[15].name = "ai.classify.test";table[15].fn = rpc_ai_classify_test;table[15].user_ctx = NULL;
+    table[16].name = "ai.classify.stats";table[16].fn = rpc_ai_classify_stats;table[16].user_ctx = NULL;
+    table[17].name = "ai.classify.set_model";table[17].fn = rpc_ai_classify_set_model;table[17].user_ctx = NULL;
+    return 18;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)
