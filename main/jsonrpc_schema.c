@@ -40,6 +40,7 @@
 #include "coex.h"
 #include "ai_model.h"
 #include "ai_classifier.h"
+#include "ai_anomaly.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -400,6 +401,72 @@ static esp_err_t rpc_ai_classify_set_model(const char *method, const char *param
 }
 
 /*============================================================================*/
+static esp_err_t rpc_ai_anomaly_set_model(const char *method, const char *params_json,
+                                           char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (name == NULL || !cJSON_IsString(name)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing name", out, out_sz);
+    }
+
+    esp_err_t rc = ai_anomaly_set_model(cJSON_GetStringValue(name));
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "set_model failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+static esp_err_t rpc_ai_anomaly_set_threshold(const char *method, const char *params_json,
+                                              char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *th = cJSON_GetObjectItem(root, "threshold");
+    if (th == NULL || !cJSON_IsNumber(th)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing threshold", out, out_sz);
+    }
+
+    esp_err_t rc = ai_anomaly_set_threshold((float)cJSON_GetNumberValue(th));
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "set_threshold failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+static esp_err_t rpc_ai_anomaly_stats(const char *method, const char *params_json,
+                                      char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = ai_anomaly_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "anomaly stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -663,7 +730,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 18) return 0;
+    if (cap < 21) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -682,7 +749,10 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[15].name = "ai.classify.test";table[15].fn = rpc_ai_classify_test;table[15].user_ctx = NULL;
     table[16].name = "ai.classify.stats";table[16].fn = rpc_ai_classify_stats;table[16].user_ctx = NULL;
     table[17].name = "ai.classify.set_model";table[17].fn = rpc_ai_classify_set_model;table[17].user_ctx = NULL;
-    return 18;
+    table[18].name = "ai.anomaly.set_model"; table[18].fn = rpc_ai_anomaly_set_model; table[18].user_ctx = NULL;
+    table[19].name = "ai.anomaly.set_threshold"; table[19].fn = rpc_ai_anomaly_set_threshold; table[19].user_ctx = NULL;
+    table[20].name = "ai.anomaly.stats"; table[20].fn = rpc_ai_anomaly_stats; table[20].user_ctx = NULL;
+    return 21;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

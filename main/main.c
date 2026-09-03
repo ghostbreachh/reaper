@@ -285,6 +285,7 @@ static void run_init_sequence(void)
     _init_row("Wi-Fi Subsystem  (802.11bgn promiscuous)",
               ai_model_zoo_init(), false);
               ai_classifier_init(), false);
+              ai_anomaly_init(), false);
               coex_init(), false);
               wifi_sniffer_init(), false);
 

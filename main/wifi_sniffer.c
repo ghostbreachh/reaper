@@ -1,5 +1,6 @@
 #include "channel_hopper.h"
 #include "ai_classifier.h"
+#include "ai_anomaly.h"
 #include "wifi_sniffer.h"
 #include "led_indicator.h"
 #include "storage_sd.h"
@@ -669,6 +670,7 @@ static void wifi_pkt_worker_task(void *arg)
                     parse_wifi_packet(&msg);
                     ai_classify_result_t cls_res;
                     ai_classifier_predict(msg.payload, msg.len, &cls_res);
+                    ai_anomaly_feed(msg.rssi, msg.len, msg.tv.tv_sec * 1000000ULL + msg.tv.tv_usec);
                     if (atomic_load(&g_arp_poison_active)) {
                         arp_feed_packet(msg.payload, msg.len);
                         arp_relay_frame(msg.payload, msg.len);

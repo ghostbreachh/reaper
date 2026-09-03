@@ -37,5 +37,6 @@
 #include "coex.h"
 #include "ai_model.h"
 #include "ai_classifier.h"
+#include "ai_anomaly.h"
 
 #endif // HELPER_H
