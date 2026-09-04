@@ -49,6 +49,7 @@
 #include "ai_ble_profiler.h"
 #include "ai_training.h"
 #include "wardrive.h"
+#include "attack_planner.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -1144,6 +1145,108 @@ static esp_err_t rpc_wardrive_status(const char *method, const char *params_json
 }
 
 /*============================================================================*/
+static esp_err_t rpc_attack_plan(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+    cJSON *idx_item = cJSON_GetObjectItem(root, "idx");
+    if (idx_item == NULL || !cJSON_IsNumber(idx_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing idx", out, out_sz);
+    }
+    int ap_index = cJSON_GetNumberValue(idx_item);
+    cJSON_Delete(root);
+
+    attack_plan_t plan;
+    esp_err_t rc = attack_planner_build_plan((uint32_t)ap_index, &plan);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "plan failed", out, out_sz);
+    }
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddStringToObject(res, "bssid", plan.bssid);
+    cJSON_AddStringToObject(res, "ssid", plan.ssid);
+    cJSON_AddNumberToObject(res, "channel", plan.channel);
+    cJSON_AddNumberToObject(res, "security", plan.security);
+    cJSON_AddBoolToObject(res, "pmf_required", plan.pmf_required);
+    cJSON_AddNumberToObject(res, "score", plan.score);
+    cJSON_AddStringToObject(res, "warning", plan.warning);
+    cJSON *steps = cJSON_CreateArray();
+    for (uint8_t i = 0; i < plan.step_count; i++) {
+        cJSON_AddItemToArray(steps, cJSON_CreateString(attack_step_name(plan.steps[i])));
+    }
+    cJSON_AddItemToObject(res, "steps", steps);
+    cJSON_AddStringToObject(res, "summary", plan.summary);
+    char *printed = cJSON_PrintUnformatted(res);
+    esp_err_t rc2 = jsonrpc_send_result(-1, printed, out, out_sz);
+    cJSON_Delete(res);
+    cJSON_free(printed);
+    return rc2;
+}
+
+static esp_err_t rpc_attack_best(const char *method, const char *params_json,
+                                char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    uint32_t best_idx = 0;
+    esp_err_t rc = attack_planner_best_target(&best_idx);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "no target found", out, out_sz);
+    }
+
+    ap_info_t ap;
+    rc = wifi_sniffer_get_ap(best_idx, &ap);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "ap fetch failed", out, out_sz);
+    }
+
+    char bssid[18];
+    snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X",
+             ap.bssid[0], ap.bssid[1], ap.bssid[2],
+             ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+
+    attack_plan_t plan;
+    rc = attack_planner_build_plan(best_idx, &plan);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "plan failed", out, out_sz);
+    }
+
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddStringToObject(res, "bssid", bssid);
+    cJSON_AddStringToObject(res, "ssid", ap.ssid);
+    cJSON_AddNumberToObject(res, "channel", ap.channel);
+    cJSON_AddNumberToObject(res, "score", plan.score);
+    cJSON_AddStringToObject(res, "summary", plan.summary);
+    char *printed = cJSON_PrintUnformatted(res);
+    esp_err_t rc2 = jsonrpc_send_result(-1, printed, out, out_sz);
+    cJSON_Delete(res);
+    cJSON_free(printed);
+    return rc2;
+}
+
+static esp_err_t rpc_attack_stats(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = attack_planner_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -1407,7 +1510,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 49) return 0;
+    if (cap < 52) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -1457,7 +1560,10 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[46].name = "wardrive.stop";   table[46].fn = rpc_wardrive_stop;   table[46].user_ctx = NULL;
     table[47].name = "wardrive.stats";  table[47].fn = rpc_wardrive_stats;  table[47].user_ctx = NULL;
     table[48].name = "wardrive.status"; table[48].fn = rpc_wardrive_status; table[48].user_ctx = NULL;
-    return 49;
+    table[49].name = "attack.plan";     table[49].fn = rpc_attack_plan;     table[49].user_ctx = NULL;
+    table[50].name = "attack.best";     table[50].fn = rpc_attack_best;     table[50].user_ctx = NULL;
+    table[51].name = "attack.stats";    table[51].fn = rpc_attack_stats;    table[51].user_ctx = NULL;
+    return 52;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

@@ -294,6 +294,7 @@ static void run_init_sequence(void)
               ai_ble_profiler_init(), false);
               ai_train_init(), false);
               wardrive_init(), false);
+              attack_planner_init(), false);
               coex_init(), false);
               wifi_sniffer_init(), false);
 

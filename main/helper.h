@@ -46,5 +46,6 @@
 #include "ai_ble_profiler.h"
 #include "ai_training.h"
 #include "wardrive.h"
+#include "attack_planner.h"
 
 #endif // HELPER_H
