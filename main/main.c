@@ -297,6 +297,7 @@ static void run_init_sequence(void)
               attack_planner_init(), false);
               stealth_init(), false);
               scheduler_init(), false);
+              reaction_rules_init(), false);
               coex_init(), false);
               wifi_sniffer_init(), false);
 

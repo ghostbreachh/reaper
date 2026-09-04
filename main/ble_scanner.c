@@ -5,6 +5,8 @@
 #include "ble_phy.h"
 #include "ble_iso.h"
 #include "ai_ble_profiler.h"
+#include "reaction_rules.h"
+#include "reaction_rules.h"
 #include "led_indicator.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -347,6 +349,9 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                                      event->disc.data,
                                      event->disc.length_data,
                                      &profile);
+
+            /* Reaction rules: BLE seen */
+            reaction_rules_check_ble(event->disc.addr.val);
 
             /* Label for training capture */
             if (ai_train_get_mode() != AI_TRAIN_MODE_OFF) {

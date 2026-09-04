@@ -52,6 +52,7 @@
 #include "attack_planner.h"
 #include "stealth.h"
 #include "scheduler.h"
+#include "reaction_rules.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -1472,6 +1473,107 @@ static esp_err_t rpc_scheduler_save(const char *method, const char *params_json,
     return jsonrpc_send_result(-1, "\"saved\"", out, out_sz);
 }
 
+
+/*============================================================================*/
+static esp_err_t rpc_reaction_add(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+    reaction_rule_t rule;
+    memset(&rule, 0, sizeof(rule));
+    rule.enabled = true;
+
+    cJSON *trig = cJSON_GetObjectItem(root, "trigger");
+    if (trig != NULL && cJSON_IsString(trig)) {
+        const char *ts = cJSON_GetStringValue(trig);
+        if (strcmp(ts, "ap_seen") == 0) rule.trigger = REACTION_TRIG_AP_SEEN;
+        else if (strcmp(ts, "client_join") == 0) rule.trigger = REACTION_TRIG_CLIENT_JOIN;
+        else if (strcmp(ts, "anomaly_high") == 0) rule.trigger = REACTION_TRIG_ANOMALY_HIGH;
+        else if (strcmp(ts, "ble_seen") == 0) rule.trigger = REACTION_TRIG_BLE_SEEN;
+        else if (strcmp(ts, "handshake") == 0) rule.trigger = REACTION_TRIG_HANDSHAKE;
+        else if (strcmp(ts, "rogue_ap") == 0) rule.trigger = REACTION_TRIG_ROGUE_AP;
+    }
+
+    cJSON *act = cJSON_GetObjectItem(root, "action");
+    if (act != NULL && cJSON_IsString(act)) {
+        const char *as = cJSON_GetStringValue(act);
+        if (strcmp(as, "deauth") == 0) rule.action = REACTION_ACT_DEAUTH;
+        else if (strcmp(as, "wardrive") == 0) rule.action = REACTION_ACT_WARDRIVE_START;
+        else if (strcmp(as, "stealth_passive") == 0) rule.action = REACTION_ACT_STEALTH_PASSIVE;
+        else if (strcmp(as, "train_start") == 0) rule.action = REACTION_ACT_TRAIN_START;
+        else if (strcmp(as, "train_stop") == 0) rule.action = REACTION_ACT_TRAIN_STOP;
+        else if (strcmp(as, "alert") == 0) rule.action = REACTION_ACT_ALERT;
+    }
+
+    cJSON *param = cJSON_GetObjectItem(root, "param");
+    if (param != NULL && cJSON_IsString(param)) {
+        strncpy((char *)rule.param, cJSON_GetStringValue(param), sizeof(rule.param) - 1);
+        rule.param[sizeof(rule.param) - 1] = '\0';
+    }
+
+    cJSON *action_param = cJSON_GetObjectItem(root, "action_param");
+    if (action_param != NULL && cJSON_IsString(action_param)) {
+        strncpy((char *)rule.action_param, cJSON_GetStringValue(action_param), sizeof(rule.action_param) - 1);
+        rule.action_param[sizeof(rule.action_param) - 1] = '\0';
+    }
+
+    int idx = reaction_rules_add(&rule);
+    cJSON_Delete(root);
+    if (idx < 0) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "reaction add failed", out, out_sz);
+    }
+    cJSON *res = cJSON_CreateNumber((double)idx);
+    char *printed = cJSON_PrintUnformatted(res);
+    esp_err_t rc = jsonrpc_send_result(-1, printed, out, out_sz);
+    cJSON_Delete(res);
+    cJSON_free(printed);
+    return rc;
+}
+
+static esp_err_t rpc_reaction_remove(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+    cJSON *idx_item = cJSON_GetObjectItem(root, "idx");
+    if (idx_item == NULL || !cJSON_IsNumber(idx_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing idx", out, out_sz);
+    }
+    int idx = (int)cJSON_GetNumberValue(idx_item);
+    cJSON_Delete(root);
+    esp_err_t rc = reaction_rules_remove((uint8_t)idx);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "remove failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"removed\"", out, out_sz);
+}
+
+static esp_err_t rpc_reaction_list(const char *method, const char *params_json,
+                                  char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[1024];
+    esp_err_t rc = reaction_rules_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "list failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
 /*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
@@ -1797,7 +1899,10 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[57].name = "scheduler.update"; table[57].fn = rpc_scheduler_update; table[57].user_ctx = NULL;
     table[58].name = "scheduler.list";  table[58].fn = rpc_scheduler_list;  table[58].user_ctx = NULL;
     table[59].name = "scheduler.save";  table[59].fn = rpc_scheduler_save;  table[59].user_ctx = NULL;
-    return 60;
+    table[60].name = "reaction.add";    table[60].fn = rpc_reaction_add;    table[60].user_ctx = NULL;
+    table[61].name = "reaction.remove"; table[61].fn = rpc_reaction_remove; table[61].user_ctx = NULL;
+    table[62].name = "reaction.list";   table[62].fn = rpc_reaction_list;   table[62].user_ctx = NULL;
+    return 63;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

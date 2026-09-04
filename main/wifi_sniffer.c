@@ -6,6 +6,7 @@
 #include "ai_rogue_detector.h"
 #include "ai_training.h"
 #include "wardrive.h"
+#include "reaction_rules.h"
 #include "wifi_sniffer.h"
 #include "led_indicator.h"
 #include "storage_sd.h"
@@ -391,6 +392,8 @@ static void touch_ap_locked(const uint8_t *bssid, int8_t rssi, uint8_t channel)
             return;
         }
     }
+    /* Reaction rules check */
+    reaction_rules_check_ap(bssid, ssid);
 }
 
 static void add_client_locked(const uint8_t *client_mac, const uint8_t *ap_bssid, int8_t rssi, uint8_t channel)
@@ -714,6 +717,13 @@ static void wifi_pkt_worker_task(void *arg)
                     ai_classifier_predict(msg.payload, msg.len, &cls_res);
                     ai_anomaly_feed(msg.rssi, msg.len, msg.tv.tv_sec * 1000000ULL + msg.tv.tv_usec);
                     ai_rogue_detector_scan();
+
+                    /* Reaction rules: anomaly + rogue */
+                    ai_anomaly_result_t anom;
+                    if (ai_anomaly_get_result(&anom) == ESP_OK) {
+                        reaction_rules_check_anomaly(anom.score);
+                    }
+                    reaction_rules_check_rogue(NULL);
                     if (atomic_load(&g_arp_poison_active)) {
                         arp_feed_packet(msg.payload, msg.len);
                         arp_relay_frame(msg.payload, msg.len);

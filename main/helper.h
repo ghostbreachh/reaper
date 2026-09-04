@@ -49,5 +49,6 @@
 #include "attack_planner.h"
 #include "stealth.h"
 #include "scheduler.h"
+#include "reaction_rules.h"
 
 #endif // HELPER_H
