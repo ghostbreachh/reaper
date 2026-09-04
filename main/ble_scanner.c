@@ -4,6 +4,7 @@
 #include "ble_periodic.h"
 #include "ble_phy.h"
 #include "ble_iso.h"
+#include "ai_ble_profiler.h"
 #include "led_indicator.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -340,6 +341,12 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                 iso_seen, has_big, iso_channels, bis_handles, iso_interval
             );
 
+            /* Classify BLE device */
+            ai_ble_profile_t profile;
+            ai_ble_profiler_classify(event->disc.addr.val,
+                                     event->disc.data,
+                                     event->disc.length_data,
+                                     &profile);
 
             xSemaphoreGive(g_ble_lock);
         }

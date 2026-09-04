@@ -43,5 +43,6 @@
 #include "ai_handshake_quality.h"
 #include "ai_rogue_detector.h"
 #include "ai_deauth_predictor.h"
+#include "ai_ble_profiler.h"
 
 #endif // HELPER_H
