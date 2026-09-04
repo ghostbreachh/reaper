@@ -48,5 +48,6 @@
 #include "wardrive.h"
 #include "attack_planner.h"
 #include "stealth.h"
+#include "scheduler.h"
 
 #endif // HELPER_H

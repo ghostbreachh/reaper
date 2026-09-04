@@ -51,6 +51,7 @@
 #include "wardrive.h"
 #include "attack_planner.h"
 #include "stealth.h"
+#include "scheduler.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -1308,6 +1309,170 @@ static esp_err_t rpc_stealth_status(const char *method, const char *params_json,
 }
 
 /*============================================================================*/
+static esp_err_t rpc_scheduler_add(const char *method, const char *params_json,
+                                  char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+    sched_entry_t entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.enabled = true;
+
+    cJSON *min = cJSON_GetObjectItem(root, "minute");
+    if (min != NULL && cJSON_IsNumber(min)) entry.minute = (uint8_t)cJSON_GetNumberValue(min);
+
+    cJSON *hr = cJSON_GetObjectItem(root, "hour");
+    if (hr != NULL && cJSON_IsNumber(hr)) entry.hour = (uint8_t)cJSON_GetNumberValue(hr);
+
+    cJSON *dow = cJSON_GetObjectItem(root, "day_of_week");
+    if (dow != NULL && cJSON_IsNumber(dow)) entry.day_of_week = (uint8_t)cJSON_GetNumberValue(dow);
+
+    cJSON *act = cJSON_GetObjectItem(root, "action");
+    if (act != NULL && cJSON_IsString(act)) {
+        const char *as = cJSON_GetStringValue(act);
+        if (strcmp(as, "wifi_start") == 0) entry.action = SCHED_ACTION_WIFI_START;
+        else if (strcmp(as, "wifi_stop") == 0) entry.action = SCHED_ACTION_WIFI_STOP;
+        else if (strcmp(as, "stealth") == 0) entry.action = SCHED_ACTION_STEALTH_SET_MODE;
+        else if (strcmp(as, "wardrive_start") == 0) entry.action = SCHED_ACTION_WARDRIVE_START;
+        else if (strcmp(as, "wardrive_stop") == 0) entry.action = SCHED_ACTION_WARDRIVE_STOP;
+        else if (strcmp(as, "train_start") == 0) entry.action = SCHED_ACTION_AI_TRAIN_START;
+        else if (strcmp(as, "train_stop") == 0) entry.action = SCHED_ACTION_AI_TRAIN_STOP;
+        else if (strcmp(as, "jsonrpc") == 0) entry.action = SCHED_ACTION_CUSTOM_JSONRPC;
+    }
+
+    cJSON *params = cJSON_GetObjectItem(root, "params");
+    if (params != NULL && cJSON_IsString(params)) {
+        strncpy(entry.params, cJSON_GetStringValue(params), sizeof(entry.params) - 1);
+        entry.params[sizeof(entry.params) - 1] = '\0';
+    }
+
+    int idx = scheduler_add(&entry);
+    cJSON_Delete(root);
+    if (idx < 0) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "scheduler add failed", out, out_sz);
+    }
+    cJSON *res = cJSON_CreateNumber((double)idx);
+    char *printed = cJSON_PrintUnformatted(res);
+    esp_err_t rc = jsonrpc_send_result(-1, printed, out, out_sz);
+    cJSON_Delete(res);
+    cJSON_free(printed);
+    return rc;
+}
+
+static esp_err_t rpc_scheduler_remove(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+    cJSON *idx_item = cJSON_GetObjectItem(root, "idx");
+    if (idx_item == NULL || !cJSON_IsNumber(idx_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing idx", out, out_sz);
+    }
+    int idx = (int)cJSON_GetNumberValue(idx_item);
+    cJSON_Delete(root);
+    esp_err_t rc = scheduler_remove((uint8_t)idx);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "remove failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"removed\"", out, out_sz);
+}
+
+static esp_err_t rpc_scheduler_update(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+    cJSON *idx_item = cJSON_GetObjectItem(root, "idx");
+    if (idx_item == NULL || !cJSON_IsNumber(idx_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing idx", out, out_sz);
+    }
+    int idx = (int)cJSON_GetNumberValue(idx_item);
+
+    sched_entry_t entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.enabled = true;
+
+    cJSON *min = cJSON_GetObjectItem(root, "minute");
+    if (min != NULL && cJSON_IsNumber(min)) entry.minute = (uint8_t)cJSON_GetNumberValue(min);
+
+    cJSON *hr = cJSON_GetObjectItem(root, "hour");
+    if (hr != NULL && cJSON_IsNumber(hr)) entry.hour = (uint8_t)cJSON_GetNumberValue(hr);
+
+    cJSON *dow = cJSON_GetObjectItem(root, "day_of_week");
+    if (dow != NULL && cJSON_IsNumber(dow)) entry.day_of_week = (uint8_t)cJSON_GetNumberValue(dow);
+
+    cJSON *act = cJSON_GetObjectItem(root, "action");
+    if (act != NULL && cJSON_IsString(act)) {
+        const char *as = cJSON_GetStringValue(act);
+        if (strcmp(as, "wifi_start") == 0) entry.action = SCHED_ACTION_WIFI_START;
+        else if (strcmp(as, "wifi_stop") == 0) entry.action = SCHED_ACTION_WIFI_STOP;
+        else if (strcmp(as, "stealth") == 0) entry.action = SCHED_ACTION_STEALTH_SET_MODE;
+        else if (strcmp(as, "wardrive_start") == 0) entry.action = SCHED_ACTION_WARDRIVE_START;
+        else if (strcmp(as, "wardrive_stop") == 0) entry.action = SCHED_ACTION_WARDRIVE_STOP;
+        else if (strcmp(as, "train_start") == 0) entry.action = SCHED_ACTION_AI_TRAIN_START;
+        else if (strcmp(as, "train_stop") == 0) entry.action = SCHED_ACTION_AI_TRAIN_STOP;
+        else if (strcmp(as, "jsonrpc") == 0) entry.action = SCHED_ACTION_CUSTOM_JSONRPC;
+    }
+
+    cJSON *params = cJSON_GetObjectItem(root, "params");
+    if (params != NULL && cJSON_IsString(params)) {
+        strncpy(entry.params, cJSON_GetStringValue(params), sizeof(entry.params) - 1);
+        entry.params[sizeof(entry.params) - 1] = '\0';
+    }
+
+    cJSON_Delete(root);
+    esp_err_t rc = scheduler_update((uint8_t)idx, &entry);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "update failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"updated\"", out, out_sz);
+}
+
+static esp_err_t rpc_scheduler_list(const char *method, const char *params_json,
+                                   char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[1024];
+    esp_err_t rc = scheduler_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "list failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_scheduler_save(const char *method, const char *params_json,
+                                   char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = scheduler_save();
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "save failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"saved\"", out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -1571,7 +1736,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 55) return 0;
+    if (cap < 60) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -1627,7 +1792,12 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[52].name = "stealth.set_mode"; table[52].fn = rpc_stealth_set_mode; table[52].user_ctx = NULL;
     table[53].name = "stealth.rotate_mac"; table[53].fn = rpc_stealth_rotate; table[53].user_ctx = NULL;
     table[54].name = "stealth.status";  table[54].fn = rpc_stealth_status;  table[54].user_ctx = NULL;
-    return 55;
+    table[55].name = "scheduler.add";   table[55].fn = rpc_scheduler_add;   table[55].user_ctx = NULL;
+    table[56].name = "scheduler.remove"; table[56].fn = rpc_scheduler_remove; table[56].user_ctx = NULL;
+    table[57].name = "scheduler.update"; table[57].fn = rpc_scheduler_update; table[57].user_ctx = NULL;
+    table[58].name = "scheduler.list";  table[58].fn = rpc_scheduler_list;  table[58].user_ctx = NULL;
+    table[59].name = "scheduler.save";  table[59].fn = rpc_scheduler_save;  table[59].user_ctx = NULL;
+    return 60;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)
