@@ -213,6 +213,12 @@ esp_err_t arp_poison_start(const char *victim_ip, const char *gateway_ip,
     if (victim_ip == NULL || !parse_ip_str(victim_ip, g_arp_victim_ip))
         return ESP_ERR_INVALID_ARG;
 
+    esp_err_t rc = stealth_check_tx("arp_poison");
+    if (rc != ESP_OK) {
+        ESP_LOGE(TAG, "stealth blocked arp_poison start");
+        return rc;
+    }
+
     if (gateway_ip != NULL) {
         if (!parse_ip_str(gateway_ip, g_arp_gateway_ip))
             return ESP_ERR_INVALID_ARG;

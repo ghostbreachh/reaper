@@ -108,6 +108,13 @@ esp_err_t beacon_spam_start(const char **ssids, int count, uint8_t channel,
                             uint32_t interval_ms)
 {
     if (ssids == NULL || count <= 0) return ESP_ERR_INVALID_ARG;
+
+    esp_err_t rc = stealth_check_tx("beacon_spam");
+    if (rc != ESP_OK) {
+        ESP_LOGE(TAG, "stealth blocked beacon_spam start");
+        return rc;
+    }
+
     if (count > MAX_BEACON_SSIDS) count = MAX_BEACON_SSIDS;
 
     g_beacon_ssid_count = 0;

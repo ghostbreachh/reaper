@@ -3,6 +3,7 @@
 #include "wifi_sniffer.h"
 #include "deauth_engine.h"
 #include "led_indicator.h"
+#include "stealth.h"
 #include "esp_random.h"
 #include "esp_wifi.h"
 #include "esp_mac.h"
@@ -109,6 +110,13 @@ static int g_doj_next_slot = 0;
 esp_err_t deauth_on_join_start(const uint8_t *bssid)
 {
     if (bssid == NULL) return ESP_ERR_INVALID_ARG;
+
+    esp_err_t rc = stealth_check_tx("doj");
+    if (rc != ESP_OK) {
+        ESP_LOGE(TAG, "stealth blocked deauth_on_join start");
+        return rc;
+    }
+
     memcpy(g_doj_bssid, bssid, 6);
     esp_read_mac(g_doj_our_mac, ESP_MAC_WIFI_STA);
     g_doj_bssid_channel = 0;

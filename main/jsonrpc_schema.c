@@ -50,6 +50,7 @@
 #include "ai_training.h"
 #include "wardrive.h"
 #include "attack_planner.h"
+#include "stealth.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -1247,6 +1248,66 @@ static esp_err_t rpc_attack_stats(const char *method, const char *params_json,
 }
 
 /*============================================================================*/
+static esp_err_t rpc_stealth_set_mode(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+    cJSON *mode_item = cJSON_GetObjectItem(root, "mode");
+    if (mode_item == NULL || !cJSON_IsString(mode_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing mode", out, out_sz);
+    }
+    const char *mode_str = cJSON_GetStringValue(mode_item);
+    stealth_mode_t mode = STEALTH_MODE_OFF;
+    if (strcmp(mode_str, "passive") == 0) mode = STEALTH_MODE_PASSIVE;
+    else if (strcmp(mode_str, "active") == 0) mode = STEALTH_MODE_ACTIVE;
+    else if (strcmp(mode_str, "off") == 0) mode = STEALTH_MODE_OFF;
+    else {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "mode must be off|passive|active", out, out_sz);
+    }
+    esp_err_t rc = stealth_set_mode(mode);
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "stealth set_mode failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"ok\"", out, out_sz);
+}
+
+static esp_err_t rpc_stealth_rotate(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = stealth_set_random_mac();
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "rotate failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"rotated\"", out, out_sz);
+}
+
+static esp_err_t rpc_stealth_status(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[128];
+    esp_err_t rc = stealth_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "stealth status failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -1510,7 +1571,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 52) return 0;
+    if (cap < 55) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -1563,7 +1624,10 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[49].name = "attack.plan";     table[49].fn = rpc_attack_plan;     table[49].user_ctx = NULL;
     table[50].name = "attack.best";     table[50].fn = rpc_attack_best;     table[50].user_ctx = NULL;
     table[51].name = "attack.stats";    table[51].fn = rpc_attack_stats;    table[51].user_ctx = NULL;
-    return 52;
+    table[52].name = "stealth.set_mode"; table[52].fn = rpc_stealth_set_mode; table[52].user_ctx = NULL;
+    table[53].name = "stealth.rotate_mac"; table[53].fn = rpc_stealth_rotate; table[53].user_ctx = NULL;
+    table[54].name = "stealth.status";  table[54].fn = rpc_stealth_status;  table[54].user_ctx = NULL;
+    return 55;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

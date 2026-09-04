@@ -1,6 +1,7 @@
 #include <stdatomic.h>
 #include "deauth_engine.h"
 #include "led_indicator.h"
+#include "stealth.h"
 #include "wifi_sniffer.h"
 #include "esp_wifi.h"
 #ifndef MACSTR
