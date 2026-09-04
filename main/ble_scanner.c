@@ -357,6 +357,14 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                                    (uint64_t)esp_timer_get_time());
             }
 
+            /* Wardrive logging */
+            if (wardrive_get_mode() != WARDIRVE_MODE_OFF) {
+                wardrive_log_ble(event->disc.addr.val,
+                                 NULL, /* name */
+                                 event->disc.rssi,
+                                 channel_get());
+            }
+
             xSemaphoreGive(g_ble_lock);
         }
     } else if (event->type == BLE_GAP_EVENT_DISC_COMPLETE) {

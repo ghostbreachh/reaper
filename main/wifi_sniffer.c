@@ -5,6 +5,7 @@
 #include "ai_channel_predictor.h"
 #include "ai_rogue_detector.h"
 #include "ai_training.h"
+#include "wardrive.h"
 #include "wifi_sniffer.h"
 #include "led_indicator.h"
 #include "storage_sd.h"
@@ -618,6 +619,17 @@ static void parse_wifi_packet(const wifi_pkt_msg_t *msg)
             bool regdom=false; uint8_t reg_class=0, max_tx=0;
             wifi_country_parse(data + 24, len - 24, country_code, sizeof(country_code), &reg_class, &max_tx);
             add_ap_locked(hdr->addr3, ssid, msg->rssi, msg->channel, pmf_cap, pmf_req, rsn_ver, wpa3, akm, has_rrm, has_btm, nbrs, nbr_count, is_mbssid, is_trans, max_ind, idx, he_cap, he_mcs_nss, he_ppdu, regdom, country_code, reg_class, max_tx);
+
+            /* Wardrive logging */
+            if (wardrive_get_mode() != WARDIRVE_MODE_OFF) {
+                char mac[18];
+                snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                         hdr->addr3[0], hdr->addr3[1], hdr->addr3[2],
+                         hdr->addr3[3], hdr->addr3[4], hdr->addr3[5]);
+                wardrive_log_wifi(mac, ssid, msg->rssi, msg->channel,
+                                  wpa3 ? "WPA3" : (rsn_ver ? "WPA2" : "WPA"));
+            }
+
             ai_fp_result_t fp_res;
             ai_fingerprint_classify(data + 24, len - 24, subtype, hdr->addr3, &fp_res);
             ai_rogue_detector_scan();

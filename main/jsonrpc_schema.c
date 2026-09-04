@@ -48,6 +48,7 @@
 #include "ai_deauth_predictor.h"
 #include "ai_ble_profiler.h"
 #include "ai_training.h"
+#include "wardrive.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -1070,6 +1071,79 @@ static esp_err_t rpc_ai_train_status(const char *method, const char *params_json
 }
 
 /*============================================================================*/
+static esp_err_t rpc_wardrive_start(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+    cJSON *mode_item = cJSON_GetObjectItem(root, "mode");
+    if (mode_item == NULL || !cJSON_IsString(mode_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing mode", out, out_sz);
+    }
+    const char *mode_str = cJSON_GetStringValue(mode_item);
+    wardrive_mode_t mode = str_to_mode(mode_str);
+    if (mode == WARDIRVE_MODE_OFF) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "mode must be wifi|ble|both", out, out_sz);
+    }
+    esp_err_t rc = wardrive_start(mode);
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "wardrive start failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"started\"", out, out_sz);
+}
+
+static esp_err_t rpc_wardrive_stop(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = wardrive_stop();
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "wardrive stop failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"stopped\"", out, out_sz);
+}
+
+static esp_err_t rpc_wardrive_stats(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = wardrive_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "wardrive stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_wardrive_status(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    const char *s = "off";
+    switch (wardrive_get_mode()) {
+        case WARDIRVE_MODE_WIFI: s = "wifi"; break;
+        case WARDIRVE_MODE_BLE: s = "ble"; break;
+        case WARDIRVE_MODE_BOTH: s = "both"; break;
+        default: s = "off"; break;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "\"%s\"", s);
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -1333,7 +1407,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 45) return 0;
+    if (cap < 49) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -1379,7 +1453,11 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[42].name = "ai.train.stop";   table[42].fn = rpc_ai_train_stop;   table[42].user_ctx = NULL;
     table[43].name = "ai.train.stats";  table[43].fn = rpc_ai_train_stats;  table[43].user_ctx = NULL;
     table[44].name = "ai.train.status"; table[44].fn = rpc_ai_train_status; table[44].user_ctx = NULL;
-    return 45;
+    table[45].name = "wardrive.start";  table[45].fn = rpc_wardrive_start;  table[45].user_ctx = NULL;
+    table[46].name = "wardrive.stop";   table[46].fn = rpc_wardrive_stop;   table[46].user_ctx = NULL;
+    table[47].name = "wardrive.stats";  table[47].fn = rpc_wardrive_stats;  table[47].user_ctx = NULL;
+    table[48].name = "wardrive.status"; table[48].fn = rpc_wardrive_status; table[48].user_ctx = NULL;
+    return 49;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)
