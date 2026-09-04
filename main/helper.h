@@ -44,5 +44,6 @@
 #include "ai_rogue_detector.h"
 #include "ai_deauth_predictor.h"
 #include "ai_ble_profiler.h"
+#include "ai_training.h"
 
 #endif // HELPER_H

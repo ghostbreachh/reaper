@@ -4,6 +4,7 @@
 #include "ai_fingerprint.h"
 #include "ai_channel_predictor.h"
 #include "ai_rogue_detector.h"
+#include "ai_training.h"
 #include "wifi_sniffer.h"
 #include "led_indicator.h"
 #include "storage_sd.h"
@@ -716,6 +717,11 @@ static void wifi_pkt_worker_task(void *arg)
 
                 if (atomic_load(&g_pcap_active)) {
                     pcap_write(msg.payload, msg.len, &msg.tv);
+                    if (ai_train_get_mode() != AI_TRAIN_MODE_OFF) {
+                        ai_train_label_wifi(msg.payload, msg.len,
+                                            msg.channel, msg.rssi,
+                                            msg.tv.tv_sec * 1000000ULL + msg.tv.tv_usec);
+                    }
                 }
 
                 if (pcap_ring_is_active()) {

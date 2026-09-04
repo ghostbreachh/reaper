@@ -348,6 +348,15 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
                                      event->disc.length_data,
                                      &profile);
 
+            /* Label for training capture */
+            if (ai_train_get_mode() != AI_TRAIN_MODE_OFF) {
+                ai_train_label_ble(event->disc.addr.val,
+                                   event->disc.data,
+                                   event->disc.length_data,
+                                   event->disc.rssi,
+                                   (uint64_t)esp_timer_get_time());
+            }
+
             xSemaphoreGive(g_ble_lock);
         }
     } else if (event->type == BLE_GAP_EVENT_DISC_COMPLETE) {

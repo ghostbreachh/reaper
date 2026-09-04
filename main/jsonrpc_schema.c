@@ -47,6 +47,7 @@
 #include "ai_rogue_detector.h"
 #include "ai_deauth_predictor.h"
 #include "ai_ble_profiler.h"
+#include "ai_training.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -990,6 +991,85 @@ static esp_err_t rpc_ai_ble_set_model(const char *method, const char *params_jso
 }
 
 /*============================================================================*/
+static esp_err_t rpc_ai_train_start(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+
+    cJSON *mode_item = cJSON_GetObjectItem(root, "mode");
+    if (mode_item == NULL || !cJSON_IsString(mode_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing mode", out, out_sz);
+    }
+
+    const char *mode_str = cJSON_GetStringValue(mode_item);
+    ai_train_mode_t mode = AI_TRAIN_MODE_OFF;
+    if (strcmp(mode_str, "wifi") == 0) mode = AI_TRAIN_MODE_WIFI;
+    else if (strcmp(mode_str, "ble") == 0) mode = AI_TRAIN_MODE_BLE;
+    else if (strcmp(mode_str, "both") == 0) mode = AI_TRAIN_MODE_BOTH;
+    else {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "mode must be wifi|ble|both", out, out_sz);
+    }
+
+    esp_err_t rc = ai_train_start(mode);
+    cJSON_Delete(root);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "train start failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"started\"", out, out_sz);
+}
+
+static esp_err_t rpc_ai_train_stop(const char *method, const char *params_json,
+                                   char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = ai_train_stop();
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "train stop failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"stopped\"", out, out_sz);
+}
+
+static esp_err_t rpc_ai_train_stats(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = ai_train_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "train stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+static esp_err_t rpc_ai_train_status(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[128];
+    const char *mode_str = "off";
+    switch (ai_train_get_mode()) {
+        case AI_TRAIN_MODE_WIFI: mode_str = "wifi"; break;
+        case AI_TRAIN_MODE_BLE: mode_str = "ble"; break;
+        case AI_TRAIN_MODE_BOTH: mode_str = "both"; break;
+        default: mode_str = "off"; break;
+    }
+    snprintf(buf, sizeof(buf), "\"%s\"", mode_str);
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -1253,7 +1333,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 41) return 0;
+    if (cap < 45) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -1295,7 +1375,11 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[38].name = "ai.ble.classify"; table[38].fn = rpc_ai_ble_classify; table[38].user_ctx = NULL;
     table[39].name = "ai.ble.stats";    table[39].fn = rpc_ai_ble_stats;    table[39].user_ctx = NULL;
     table[40].name = "ai.ble.set_model"; table[40].fn = rpc_ai_ble_set_model; table[40].user_ctx = NULL;
-    return 41;
+    table[41].name = "ai.train.start";  table[41].fn = rpc_ai_train_start;  table[41].user_ctx = NULL;
+    table[42].name = "ai.train.stop";   table[42].fn = rpc_ai_train_stop;   table[42].user_ctx = NULL;
+    table[43].name = "ai.train.stats";  table[43].fn = rpc_ai_train_stats;  table[43].user_ctx = NULL;
+    table[44].name = "ai.train.status"; table[44].fn = rpc_ai_train_status; table[44].user_ctx = NULL;
+    return 45;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)
