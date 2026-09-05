@@ -299,6 +299,7 @@ static void run_init_sequence(void)
               scheduler_init(), false);
               reaction_rules_init(), false);
               export_init(), false);
+              cli_flipper_init(), false);
               coex_init(), false);
               wifi_sniffer_init(), false);
 
