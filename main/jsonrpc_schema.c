@@ -53,6 +53,8 @@
 #include "stealth.h"
 #include "scheduler.h"
 #include "reaction_rules.h"
+#include "export.h"
+#include "export.h"
 #include "pcap_ring.h"
 
 static const char *TAG = "jsonrpc_schema";
@@ -1575,6 +1577,142 @@ static esp_err_t rpc_reaction_list(const char *method, const char *params_json,
 }
 
 /*============================================================================*/
+static esp_err_t rpc_export_start(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+    cJSON *mode_item = cJSON_GetObjectItem(root, "mode");
+    if (mode_item == NULL || !cJSON_IsString(mode_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing mode", out, out_sz);
+    }
+    const char *mode_str = cJSON_GetStringValue(mode_item);
+    export_mode_t mode = EXPORT_MODE_OFF;
+    if (strcmp(mode_str, "pcap") == 0) mode = EXPORT_MODE_PCAP;
+    else if (strcmp(mode_str, "pcapng") == 0) mode = EXPORT_MODE_PCAP_NG;
+    else if (strcmp(mode_str, "netxml") == 0) mode = EXPORT_MODE_NETXML;
+    else if (strcmp(mode_str, "csv") == 0) mode = EXPORT_MODE_CSV;
+    else if (strcmp(mode_str, "jsonl") == 0) mode = EXPORT_MODE_JSONL;
+    else if (strcmp(mode_str, "zstd") == 0) mode = EXPORT_MODE_ZST;
+    else {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "mode must be pcap|pcapng|netxml|csv|jsonl|zstd", out, out_sz);
+    }
+    cJSON *path_item = cJSON_GetObjectItem(root, "path");
+    const char *path = "/sd/export.pcap";
+    if (path_item != NULL && cJSON_IsString(path_item)) {
+        path = cJSON_GetStringValue(path_item);
+    }
+    cJSON_Delete(root);
+    esp_err_t rc = export_start(mode, path);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "export start failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"started\"", out, out_sz);
+}
+
+static esp_err_t rpc_export_stop(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = export_stop();
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "export stop failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"stopped\"", out, out_sz);
+}
+
+static esp_err_t rpc_export_stats(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = export_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "export stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+/*============================================================================*/
+static esp_err_t rpc_export_start(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)user_ctx;
+    cJSON *root = cJSON_Parse(params_json);
+    if (root == NULL) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "invalid JSON", out, out_sz);
+    }
+    cJSON *mode_item = cJSON_GetObjectItem(root, "mode");
+    if (mode_item == NULL || !cJSON_IsString(mode_item)) {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "missing mode", out, out_sz);
+    }
+    const char *mode_str = cJSON_GetStringValue(mode_item);
+    export_mode_t mode = EXPORT_MODE_OFF;
+    if (strcmp(mode_str, "pcap") == 0) mode = EXPORT_MODE_PCAP;
+    else if (strcmp(mode_str, "pcapng") == 0) mode = EXPORT_MODE_PCAP_NG;
+    else if (strcmp(mode_str, "netxml") == 0) mode = EXPORT_MODE_NETXML;
+    else if (strcmp(mode_str, "csv") == 0) mode = EXPORT_MODE_CSV;
+    else if (strcmp(mode_str, "jsonl") == 0) mode = EXPORT_MODE_JSONL;
+    else if (strcmp(mode_str, "zstd") == 0) mode = EXPORT_MODE_ZST;
+    else {
+        cJSON_Delete(root);
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
+                                  "mode must be pcap|pcapng|netxml|csv|jsonl|zstd", out, out_sz);
+    }
+    cJSON *path_item = cJSON_GetObjectItem(root, "path");
+    const char *path = "/sd/export.pcap";
+    if (path_item != NULL && cJSON_IsString(path_item)) {
+        path = cJSON_GetStringValue(path_item);
+    }
+    cJSON_Delete(root);
+    esp_err_t rc = export_start(mode, path);
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "export start failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"started\"", out, out_sz);
+}
+
+static esp_err_t rpc_export_stop(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = export_stop();
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "export stop failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, "\"stopped\"", out, out_sz);
+}
+
+static esp_err_t rpc_export_stats(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char buf[256];
+    esp_err_t rc = export_json(buf, sizeof(buf));
+    if (rc != ESP_OK) {
+        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
+                                  "export stats failed", out, out_sz);
+    }
+    return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_system_ping(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
@@ -1902,7 +2040,10 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[60].name = "reaction.add";    table[60].fn = rpc_reaction_add;    table[60].user_ctx = NULL;
     table[61].name = "reaction.remove"; table[61].fn = rpc_reaction_remove; table[61].user_ctx = NULL;
     table[62].name = "reaction.list";   table[62].fn = rpc_reaction_list;   table[62].user_ctx = NULL;
-    return 63;
+    table[63].name = "export.start";    table[63].fn = rpc_export_start;    table[63].user_ctx = NULL;
+    table[64].name = "export.stop";     table[64].fn = rpc_export_stop;     table[64].user_ctx = NULL;
+    table[65].name = "export.stats";    table[65].fn = rpc_export_stats;    table[65].user_ctx = NULL;
+    return 66;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)

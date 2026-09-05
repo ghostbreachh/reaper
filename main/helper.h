@@ -50,5 +50,6 @@
 #include "stealth.h"
 #include "scheduler.h"
 #include "reaction_rules.h"
+#include "export.h"
 
 #endif // HELPER_H

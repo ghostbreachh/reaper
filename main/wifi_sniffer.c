@@ -7,6 +7,7 @@
 #include "ai_training.h"
 #include "wardrive.h"
 #include "reaction_rules.h"
+#include "export.h"
 #include "wifi_sniffer.h"
 #include "led_indicator.h"
 #include "storage_sd.h"
@@ -739,6 +740,9 @@ static void wifi_pkt_worker_task(void *arg)
 
                 if (atomic_load(&g_pcap_active)) {
                     pcap_write(msg.payload, msg.len, &msg.tv);
+                    export_write_packet(msg.payload, msg.len,
+                                        msg.channel, msg.rssi,
+                                        msg.tv.tv_sec * 1000000ULL + msg.tv.tv_usec);
                     if (ai_train_get_mode() != AI_TRAIN_MODE_OFF) {
                         ai_train_label_wifi(msg.payload, msg.len,
                                             msg.channel, msg.rssi,
