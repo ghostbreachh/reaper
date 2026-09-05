@@ -1,0 +1,36 @@
+name: REAPER CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32s3, esp32c3, esp32c6]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.espressif
+          key: esp-idf-${{ matrix.target }}
+      - name: Install ESP-IDF
+        uses: espressif/actions/build-esp-idf@v2
+        with:
+          target: ${{ matrix.target }}
+      - name: Build firmware
+        run: |
+          . ${HOME}/esp/esp-idf/export.sh
+          idf.py build
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.target }}
+          path: build/*.bin
+          retention-days: 14

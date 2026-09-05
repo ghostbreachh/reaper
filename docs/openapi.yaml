@@ -1,0 +1,170 @@
+openapi: 3.0.3
+info:
+  title: REAPER JSON-RPC API
+  version: 1.0.0
+  description: ESP32-S3 REAPER firmware JSON-RPC surface over USB CDC-ACM.
+servers:
+  - url: cdc://esp32s3
+paths: {}
+components:
+  schemas:
+    Error:
+      type: object
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+  x-methods:
+    - name: system.ping
+      summary: Heartbeat
+    - name: system.info
+      summary: Firmware info
+    - name: system.caps
+      summary: Capability flags
+    - name: system.health
+      summary: Health telemetry
+    - name: gps.set_fix
+      summary: Inject phone GPS fix
+      params:
+        lat: {type: number}
+        lon: {type: number}
+        alt: {type: number}
+        sats: {type: integer}
+        fix: {type: integer}
+        timestamp: {type: integer}
+    - name: gps.get_fix
+      summary: Get current GPS fix
+    - name: gps.status
+      summary: GPS subsystem status
+    - name: coex.set_pref
+      summary: Set WiFi/BLE coexistence preference
+      params:
+        pref: {type: string, enum: [wifi,ble,balance]}
+    - name: coex.get_status
+      summary: Get coexistence status
+    - name: coex.json
+      summary: Coexistence JSON report
+    - name: ai.model.load
+      summary: Load ESP-DL model by name
+      params:
+        name: {type: string}
+    - name: ai.model.unload
+      summary: Unload model by name
+      name: ai.model.infer
+      summary: Run model inference
+    - name: ai.model.list
+      summary: List loaded models
+    - name: ai.classify.test
+      summary: Classify a raw frame
+    - name: ai.classify.stats
+      summary: Classifier stats
+    - name: ai.classify.set_model
+      summary: Switch classifier model
+    - name: ai.anomaly.set_model
+      summary: Switch anomaly model
+    - name: ai.anomaly.set_threshold
+      summary: Set anomaly threshold
+    - name: ai.anomaly.stats
+      summary: Anomaly stats
+    - name: ai.fp.set_model
+      summary: Switch fingerprint model
+    - name: ai.fp.stats
+      summary: Fingerprint stats
+    - name: ai.fp.test
+      summary: Fingerprint test
+    - name: ai.channel.predict
+      summary: Predict channel occupancy
+    - name: ai.channel.stats
+      summary: Channel predictor stats
+    - name: ai.channel.record
+      summary: Record channel snapshot
+    - name: ai.channel.set_model
+      summary: Switch channel predictor model
+    - name: ai.hs.score
+      summary: Score handshake quality
+    - name: ai.hs.stats
+      summary: Handshake scorer stats
+    - name: ai.hs.set_model
+      summary: Switch handshake model
+    - name: ai.hs.test
+      summary: Handshake score test
+    - name: ai.rogue.scan
+      summary: Run rogue AP scan
+    - name: ai.rogue.alerts
+      summary: Get rogue alerts
+    - name: ai.deauth.predict
+      summary: Predict deauth effectiveness
+    - name: ai.deauth.predict_all
+      summary: Predict all targets
+    - name: ai.deauth.stats
+      summary: Deauth predictor stats
+    - name: ai.deauth.set_model
+      summary: Switch deauth model
+    - name: ai.ble.classify
+      summary: Classify BLE device
+    - name: ai.ble.stats
+      summary: BLE profiler stats
+    - name: ai.ble.set_model
+      summary: Switch BLE profiler model
+    - name: ai.train.start
+      summary: Start training capture
+      params:
+        mode: {type: string, enum: [wifi,ble,both]}
+    - name: ai.train.stop
+      summary: Stop training capture
+    - name: ai.train.stats
+      summary: Training capture stats
+    - name: ai.train.status
+      summary: Training capture status
+    - name: wardrive.start
+      summary: Start wardrive logging
+      params:
+        mode: {type: string, enum: [wifi,ble,both]}
+    - name: wardrive.stop
+      summary: Stop wardrive logging
+    - name: wardrive.stats
+      summary: Wardrive stats
+    - name: wardrive.status
+      summary: Wardrive status
+    - name: attack.plan
+      summary: Build attack plan
+      params:
+        idx: {type: integer}
+    - name: attack.best
+      summary: Auto-select best target
+    - name: attack.stats
+      summary: Planner stats
+    - name: stealth.set_mode
+      summary: Set stealth mode
+      params:
+        mode: {type: string, enum: [off,passive,active]}
+    - name: stealth.rotate_mac
+      summary: Rotate random MAC
+    - name: stealth.status
+      summary: Stealth status
+    - name: scheduler.add
+      summary: Add scheduled task
+    - name: scheduler.remove
+      summary: Remove scheduled task
+    - name: scheduler.update
+      summary: Update scheduled task
+    - name: scheduler.list
+      summary: List scheduled tasks
+    - name: scheduler.save
+      summary: Persist schedule to NVS
+    - name: reaction.add
+      summary: Add reaction rule
+    - name: reaction.remove
+      summary: Remove reaction rule
+    - name: reaction.list
+      summary: List reaction rules
+    - name: export.start
+      summary: Start export stream
+      params:
+        mode: {type: string, enum: [pcap,pcapng,netxml,csv,jsonl,zstd]}
+        path: {type: string}
+    - name: export.stop
+      summary: Stop export stream
+    - name: export.stats
+      summary: Export stats

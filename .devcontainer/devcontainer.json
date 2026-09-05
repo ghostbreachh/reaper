@@ -1,5 +1,5 @@
 {
-	"name": "ESP-IDF QEMU",
+	"name": "REAPER ESP-IDF Dev",
 	"build": {
 		"dockerfile": "Dockerfile"
 	},
@@ -7,13 +7,28 @@
 		"vscode": {
 			"settings": {
 				"terminal.integrated.defaultProfile.linux": "bash",
-				"idf.gitPath": "/usr/bin/git"
+				"idf.gitPath": "/usr/bin/git",
+				"idf.espIdfPath": "/opt/esp/idf",
+				"idf.toolsPath": "/usr/bin",
+				"idf.adapterTargetName": "esp32s3",
+				"files.associations": {
+					"*.h": "c",
+					"*.c": "c",
+					"CMakeLists.txt": "cmake"
+				}
 			},
 			"extensions": [
 				"espressif.esp-idf-extension",
-				"espressif.esp-idf-web"
+				"espressif.esp-idf-web",
+				"ms-vscode.cmake-tools",
+				"twxs.cmake",
+				"marus25.cortex-debug"
 			]
 		}
 	},
-	"runArgs": ["--privileged"]
+	"runArgs": ["--privileged"],
+	"mounts": [
+		"source=${localEnv:HOME}/.ssh,target=/root/.ssh,type=bind,consistency=cached"
+	],
+	"postCreateCommand": "bash -lc 'source /opt/esp/idf/export.sh > /dev/null 2>&1 && echo REAPER devcontainer ready'"
 }
