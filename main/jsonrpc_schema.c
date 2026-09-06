@@ -2288,6 +2288,85 @@ static esp_err_t rpc_ble_smarttag_list(const char *method, const char *params_js
 }
 
 /*============================================================================*/
+static esp_err_t rpc_thread_start(const char *method, const char *params_json,
+                                  char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = thread_br_start();
+    if (rc != ESP_OK) return rc;
+    return jsonrpc_send_result(-1, "{\"status\":\"started\"}", out, out_sz);
+}
+
+static esp_err_t rpc_thread_stop(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = thread_br_stop();
+    return jsonrpc_send_result(-1, "{\"status\":\"stopped\"}", out, out_sz);
+}
+
+static esp_err_t rpc_thread_status(const char *method, const char *params_json,
+                                   char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char json[64];
+    snprintf(json, sizeof(json), "{\"active\":%s}", thread_br_is_active() ? "true" : "false");
+    return jsonrpc_send_result(-1, json, out, out_sz);
+}
+
+static esp_err_t rpc_matter_start(const char *method, const char *params_json,
+                                  char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = matter_commissioner_start(NULL);
+    if (rc != ESP_OK) return rc;
+    return jsonrpc_send_result(-1, "{\"status\":\"started\"}", out, out_sz);
+}
+
+static esp_err_t rpc_matter_stop(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = matter_commissioner_stop();
+    return jsonrpc_send_result(-1, "{\"status\":\"stopped\"}", out, out_sz);
+}
+
+static esp_err_t rpc_matter_status(const char *method, const char *params_json,
+                                   char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char json[64];
+    snprintf(json, sizeof(json), "{\"active\":%s}", matter_commissioner_is_active() ? "true" : "false");
+    return jsonrpc_send_result(-1, json, out, out_sz);
+}
+
+static esp_err_t rpc_zigbee_start(const char *method, const char *params_json,
+                                  char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = zigbee_sniffer_start(11);
+    if (rc != ESP_OK) return rc;
+    return jsonrpc_send_result(-1, "{\"status\":\"started\"}", out, out_sz);
+}
+
+static esp_err_t rpc_zigbee_stop(const char *method, const char *params_json,
+                                 char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = zigbee_sniffer_stop();
+    return jsonrpc_send_result(-1, "{\"status\":\"stopped\"}", out, out_sz);
+}
+
+static esp_err_t rpc_zigbee_status(const char *method, const char *params_json,
+                                   char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char json[64];
+    snprintf(json, sizeof(json), "{\"active\":%s}", zigbee_sniffer_is_active() ? "true" : "false");
+    return jsonrpc_send_result(-1, json, out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_storage_wordlist_list(const char *method, const char *params_json,
                                            char *out, size_t out_sz, void *user_ctx)
 {
@@ -2487,6 +2566,21 @@ static uint16_t build_ble_methods(jsonrpc_method_entry_t *table, uint16_t cap)
     return 10;
 }
 
+static uint16_t build_80215_methods(jsonrpc_method_entry_t *table, uint16_t cap)
+{
+    if (cap < 9) return 0;
+    table[0].name = "thread.start";     table[0].fn = rpc_thread_start;     table[0].user_ctx = NULL;
+    table[1].name = "thread.stop";      table[1].fn = rpc_thread_stop;      table[1].user_ctx = NULL;
+    table[2].name = "thread.status";    table[2].fn = rpc_thread_status;    table[2].user_ctx = NULL;
+    table[3].name = "matter.start";     table[3].fn = rpc_matter_start;     table[3].user_ctx = NULL;
+    table[4].name = "matter.stop";      table[4].fn = rpc_matter_stop;      table[4].user_ctx = NULL;
+    table[5].name = "matter.status";    table[5].fn = rpc_matter_status;    table[5].user_ctx = NULL;
+    table[6].name = "zigbee.start";     table[6].fn = rpc_zigbee_start;     table[6].user_ctx = NULL;
+    table[7].name = "zigbee.stop";      table[7].fn = rpc_zigbee_stop;      table[7].user_ctx = NULL;
+    table[8].name = "zigbee.status";    table[8].fn = rpc_zigbee_status;    table[8].user_ctx = NULL;
+    return 9;
+}
+
 static uint16_t build_storage_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
     if (cap < 3) return 0;
@@ -2523,6 +2617,7 @@ uint16_t jsonrpc_schema_v1_build(jsonrpc_method_entry_t *table, uint16_t cap)
     offset += build_deauth_methods(table + offset, cap - offset);
     offset += build_pcap_methods(table + offset, cap - offset);
     offset += build_ble_methods(table + offset, cap - offset);
+    offset += build_80215_methods(table + offset, cap - offset);
     offset += build_storage_methods(table + offset, cap - offset);
     offset += build_ota_methods(table + offset, cap - offset);
 
