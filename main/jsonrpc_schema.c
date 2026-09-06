@@ -2620,6 +2620,7 @@ uint16_t jsonrpc_schema_v1_build(jsonrpc_method_entry_t *table, uint16_t cap)
     offset += build_80215_methods(table + offset, cap - offset);
     offset += build_storage_methods(table + offset, cap - offset);
     offset += build_ota_methods(table + offset, cap - offset);
+    offset += build_platform_methods(table + offset, cap - offset);
 
     return offset;
 }
