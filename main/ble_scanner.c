@@ -6,7 +6,17 @@
 #include "ble_iso.h"
 #include "ai_ble_profiler.h"
 #include "reaction_rules.h"
+#include "ble_mitm.h"
+#include "ble_gatt_enumerator.h"
+#include "ble_rpa_bypass.h"
+#include "ble_findmy.h"
+#include "ble_smarttag.h"
 #include "reaction_rules.h"
+#include "ble_mitm.h"
+#include "ble_gatt_enumerator.h"
+#include "ble_rpa_bypass.h"
+#include "ble_findmy.h"
+#include "ble_smarttag.h"
 #include "led_indicator.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -352,6 +362,22 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
 
             /* Reaction rules: BLE seen */
             reaction_rules_check_ble(event->disc.addr.val);
+
+            /* BLE MITM tick */
+            ble_mitm_tick((uint64_t)esp_timer_get_time());
+
+            /* Apple Find My detection */
+            findmy_parse_adv(event->disc.data, event->disc.length_data,
+                             event->disc.addr.val);
+
+            /* Samsung SmartTag / Tile detection */
+            smarttag_parse_adv(event->disc.data, event->disc.length_data,
+                               event->disc.addr.val);
+
+            /* RPA resolution check */
+            if ((event->disc.addr.val[5] & 0xC0) == 0x40) {
+                ble_rpa_bypass_check(event->disc.addr.val, NULL);
+            }
 
             /* Label for training capture */
             if (ai_train_get_mode() != AI_TRAIN_MODE_OFF) {

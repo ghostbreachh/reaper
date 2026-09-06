@@ -2238,6 +2238,56 @@ static esp_err_t rpc_ble_list(const char *method, const char *params_json,
 }
 
 /*============================================================================*/
+static esp_err_t rpc_ble_mitm_add(const char *method, const char *params_json,
+                                  char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    return jsonrpc_send_result(-1, "{\"status\":\"target_added\"}", out, out_sz);
+}
+
+static esp_err_t rpc_ble_mitm_list(const char *method, const char *params_json,
+                                   char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    return jsonrpc_send_result(-1, "[]", out, out_sz);
+}
+
+static esp_err_t rpc_ble_gatt_enumerate(const char *method, const char *params_json,
+                                        char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    return jsonrpc_send_result(-1, "{\"started\":true}", out, out_sz);
+}
+
+static esp_err_t rpc_ble_gatt_svcs(const char *method, const char *params_json,
+                                   char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    return jsonrpc_send_result(-1, "[]", out, out_sz);
+}
+
+static esp_err_t rpc_ble_gatt_chars(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    return jsonrpc_send_result(-1, "[]", out, out_sz);
+}
+
+static esp_err_t rpc_ble_findmy_list(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    return jsonrpc_send_result(-1, "[]", out, out_sz);
+}
+
+static esp_err_t rpc_ble_smarttag_list(const char *method, const char *params_json,
+                                       char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    return jsonrpc_send_result(-1, "[]", out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_storage_wordlist_list(const char *method, const char *params_json,
                                            char *out, size_t out_sz, void *user_ctx)
 {
@@ -2423,11 +2473,18 @@ static uint16_t build_pcap_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 
 static uint16_t build_ble_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 3) return 0;
-    table[0].name = "ble.scan";       table[0].fn = rpc_ble_scan;       table[0].user_ctx = NULL;
-    table[1].name = "ble.stop";       table[1].fn = rpc_ble_stop;       table[1].user_ctx = NULL;
-    table[2].name = "ble.list";       table[2].fn = rpc_ble_list;       table[2].user_ctx = NULL;
-    return 3;
+    if (cap < 10) return 0;
+    table[0].name = "ble.scan";            table[0].fn = rpc_ble_scan;            table[0].user_ctx = NULL;
+    table[1].name = "ble.stop";            table[1].fn = rpc_ble_stop;            table[1].user_ctx = NULL;
+    table[2].name = "ble.list";            table[2].fn = rpc_ble_list;            table[2].user_ctx = NULL;
+    table[3].name = "ble.mitm.add";        table[3].fn = rpc_ble_mitm_add;        table[3].user_ctx = NULL;
+    table[4].name = "ble.mitm.list";       table[4].fn = rpc_ble_mitm_list;       table[4].user_ctx = NULL;
+    table[5].name = "ble.gatt.enumerate";  table[5].fn = rpc_ble_gatt_enumerate;  table[5].user_ctx = NULL;
+    table[6].name = "ble.gatt.svcs";       table[6].fn = rpc_ble_gatt_svcs;       table[6].user_ctx = NULL;
+    table[7].name = "ble.gatt.chars";      table[7].fn = rpc_ble_gatt_chars;      table[7].user_ctx = NULL;
+    table[8].name = "ble.findmy.list";     table[8].fn = rpc_ble_findmy_list;     table[8].user_ctx = NULL;
+    table[9].name = "ble.smarttag.list";   table[9].fn = rpc_ble_smarttag_list;   table[9].user_ctx = NULL;
+    return 10;
 }
 
 static uint16_t build_storage_methods(jsonrpc_method_entry_t *table, uint16_t cap)
