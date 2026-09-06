@@ -58,6 +58,8 @@
 #include "platform_config.h"
 #include "platform_plugins.h"
 #include "platform_fleet.h"
+#include "health_ai_monitor.h"
+#include "wordlist_manager.h"
 #include "ai_training.h"
 #include "wardrive.h"
 #include "attack_planner.h"

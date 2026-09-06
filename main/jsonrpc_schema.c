@@ -56,6 +56,32 @@
 #include "export.h"
 #include "export.h"
 #include "pcap_ring.h"
+#include "offensive.h"
+#include "cli_flipper.h"
+#include "pmkid.h"
+#include "sae_sidechannel.h"
+#include "dragonfly_sim.h"
+#include "ft_roam.h"
+#include "neighbor_report.h"
+#include "btm.h"
+#include "wps_pixiedust.h"
+#include "eap_capture.h"
+#include "ble_mitm.h"
+#include "ble_gatt_enumerator.h"
+#include "ble_rpa_bypass.h"
+#include "ble_findmy.h"
+#include "ble_smarttag.h"
+#include "thread_border_router.h"
+#include "matter_commissioner.h"
+#include "zigbee_sniffer.h"
+#include "platform_secure_boot.h"
+#include "platform_antitamper.h"
+#include "platform_factory_test.h"
+#include "platform_config.h"
+#include "platform_plugins.h"
+#include "platform_fleet.h"
+#include "health_ai_monitor.h"
+#include "wordlist_manager.h"
 
 static const char *TAG = "jsonrpc_schema";
 
@@ -2367,6 +2393,39 @@ static esp_err_t rpc_zigbee_status(const char *method, const char *params_json,
 }
 
 /*============================================================================*/
+static esp_err_t rpc_health_ai_status(const char *method, const char *params_json,
+                                      char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    return health_ai_monitor_json(out, out_sz);
+}
+
+static esp_err_t rpc_health_ai_heal(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    esp_err_t rc = health_ai_monitor_heal();
+    if (rc != ESP_OK) return rc;
+    return jsonrpc_send_result(-1, "{\"status\":\"healed\"}", out, out_sz);
+}
+
+static esp_err_t rpc_wordlist_count(const char *method, const char *params_json,
+                                    char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    char json[64];
+    snprintf(json, sizeof(json), "{\"count\":%d}", (int)wordlist_manager_count());
+    return jsonrpc_send_result(-1, json, out, out_sz);
+}
+
+static esp_err_t rpc_wordlist_lookup(const char *method, const char *params_json,
+                                     char *out, size_t out_sz, void *user_ctx)
+{
+    (void)method; (void)params_json; (void)user_ctx;
+    return jsonrpc_send_result(-1, "{\"found\":false}", out, out_sz);
+}
+
+/*============================================================================*/
 static esp_err_t rpc_storage_wordlist_list(const char *method, const char *params_json,
                                            char *out, size_t out_sz, void *user_ctx)
 {
@@ -2519,7 +2578,11 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[76].name = "offensive.json";      table[76].fn = rpc_offensive_json;      table[76].user_ctx = NULL;
     table[77].name = "offensive.status";    table[77].fn = rpc_offensive_status;    table[77].user_ctx = NULL;
     table[78].name = "offensive.clear";     table[78].fn = rpc_offensive_clear;     table[78].user_ctx = NULL;
-    return 79;
+    table[79].name = "health.ai.status";    table[79].fn = rpc_health_ai_status;    table[79].user_ctx = NULL;
+    table[80].name = "health.ai.heal";      table[80].fn = rpc_health_ai_heal;      table[80].user_ctx = NULL;
+    table[81].name = "wordlist.count";      table[81].fn = rpc_wordlist_count;      table[81].user_ctx = NULL;
+    table[82].name = "wordlist.lookup";     table[82].fn = rpc_wordlist_lookup;     table[82].user_ctx = NULL;
+    return 83;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)
