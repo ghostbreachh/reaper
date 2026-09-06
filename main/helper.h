@@ -51,6 +51,7 @@
 #include "scheduler.h"
 #include "reaction_rules.h"
 #include "export.h"
+#include "offensive.h"
 #include "cli_flipper.h"
 
 #endif // HELPER_H

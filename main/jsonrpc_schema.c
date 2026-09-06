@@ -1631,6 +1631,174 @@ static esp_err_t rpc_export_stop(const char *method, const char *params_json,
     return jsonrpc_send_result(-1, "\"stopped\"", out, out_sz);
 }
 
+/* ============================================================================
+ *  OFFENSIVE RESEARCH RPC METHODS
+ * ============================================================================ */
+static esp_err_t rpc_offensive_set_mode(const char *method, const char *params_json,
+                                         char *out, size_t outsz)
+{
+    (void)method;
+    uint32_t mask = 0;
+    if (params_json && strlen(params_json) > 0) {
+        char *end = NULL;
+        mask = (uint32_t)strtoul(params_json, &end, 0);
+    }
+    offensive_set_mode(mask);
+    snprintf(out, outsz, "{"mode":"0x%08" PRIx32 ""}", offensive_get_mode());
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_get_mode(const char *method, const char *params_json,
+                                         char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    snprintf(out, outsz, "{"mode":"0x%08" PRIx32 ""}", offensive_get_mode());
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_pmkid(const char *method, const char *params_json,
+                                     char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_pmkid_t pmkid;
+    if (offensive_get_pmkid(&pmkid) != ESP_OK || !pmkid.valid) {
+        snprintf(out, outsz, "{"error":"no_pmkid"}");
+        return ESP_ERR_NOT_FOUND;
+    }
+    snprintf(out, outsz,
+        "{"ap_bssid":"" MACSTR "","pmkid":""
+        , MAC2STR(pmkid.ap_bssid));
+    for (int i = 0; i < 16 && i < (int)outsz - 8; i++) {
+        int n = strlen(out);
+        snprintf(out + n, outsz - n, "%02x", pmkid.pmkid[i]);
+    }
+    int n = strlen(out);
+    snprintf(out + n, outsz - n, ""}");
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_sae(const char *method, const char *params_json,
+                                   char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_sae_timing_t t;
+    offensive_get_sae_timing(&t);
+    snprintf(out, outsz,
+        "{"delta_ms":%" PRIu32 ","ap_bssid":"" MACSTR ""}",
+        t.delta_us, MAC2STR(t.ap_bssid));
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_dragonfly(const char *method, const char *params_json,
+                                         char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_dragonfly_t d;
+    if (offensive_get_dragonfly(&d) != ESP_OK || !d.valid) {
+        snprintf(out, outsz, "{"error":"no_dragonfly"}");
+        return ESP_ERR_NOT_FOUND;
+    }
+    snprintf(out, outsz,
+        "{"ap_bssid":"" MACSTR "","ssid":"%s"}",
+        MAC2STR(d.ap_bssid), d.ssid);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_ft(const char *method, const char *params_json,
+                                  char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_ft_t ft;
+    if (offensive_get_ft(&ft) != ESP_OK || !ft.valid) {
+        snprintf(out, outsz, "{"error":"no_ft"}");
+        return ESP_ERR_NOT_FOUND;
+    }
+    snprintf(out, outsz,
+        "{"ap_bssid":"" MACSTR "","sta_mac":"" MACSTR "","
+        ""reassoc_ms":%" PRIu32 "}",
+        MAC2STR(ft.ap_bssid), MAC2STR(ft.sta_mac), ft.reassoc_time_us);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_11k(const char *method, const char *params_json,
+                                   char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_11k_t k;
+    offensive_get_11k(&k);
+    snprintf(out, outsz,
+        "{"target_bssid":"" MACSTR "","neighbor_bssid":"" MACSTR "","
+        ""channel":%d}",
+        MAC2STR(k.target_bssid), MAC2STR(k.neighbor_bssid), k.channel);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_11v(const char *method, const char *params_json,
+                                   char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_11v_t v;
+    offensive_get_11v(&v);
+    snprintf(out, outsz,
+        "{"ap_bssid":"" MACSTR "","target_bssid":"" MACSTR "","
+        ""disassoc_timer":%d}",
+        MAC2STR(v.ap_bssid), MAC2STR(v.target_bssid), v.disassoc_timer);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_wps(const char *method, const char *params_json,
+                                   char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_wps_t w;
+    if (offensive_get_wps(&w) != ESP_OK || !w.valid) {
+        snprintf(out, outsz, "{"error":"no_wps"}");
+        return ESP_ERR_NOT_FOUND;
+    }
+    snprintf(out, outsz,
+        "{"ap_bssid":"" MACSTR "","m1_len":%d}",
+        MAC2STR(w.ap_bssid), w.m1_len);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_eap(const char *method, const char *params_json,
+                                   char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_eap_t e;
+    offensive_get_eap(&e);
+    snprintf(out, outsz,
+        "{"ap_bssid":"" MACSTR "","sta_mac":"" MACSTR "","
+        ""bytes":%d}",
+        MAC2STR(e.ap_bssid), MAC2STR(e.sta_mac), e.challenge_len);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_json(const char *method, const char *params_json,
+                                    char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    offensive_json(out, outsz);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_status(const char *method, const char *params_json,
+                                      char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    snprintf(out, outsz, "{"enabled":%s}", offensive_get_mode() ? "true" : "false");
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_clear(const char *method, const char *params_json,
+                                     char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    offensive_deinit();
+    snprintf(out, outsz, "{"status":"cleared"}");
+    return ESP_OK;
+}
+
 static esp_err_t rpc_export_stats(const char *method, const char *params_json,
                                     char *out, size_t out_sz, void *user_ctx)
 {
@@ -1642,6 +1810,172 @@ static esp_err_t rpc_export_stats(const char *method, const char *params_json,
                                   "export stats failed", out, out_sz);
     }
     return jsonrpc_send_result(-1, buf, out, out_sz);
+}
+
+/* ============================================================================
+ *  OFFENSIVE RESEARCH RPC METHODS
+ * ============================================================================ */
+static esp_err_t rpc_offensive_set_mode(const char *method, const char *params_json,
+                                         char *out, size_t outsz)
+{
+    (void)method;
+    uint32_t mask = 0;
+    if (params_json && strlen(params_json) > 0) {
+        char *end = NULL;
+        mask = (uint32_t)strtoul(params_json, &end, 0);
+    }
+    offensive_set_mode(mask);
+    snprintf(out, outsz, "{\"mode\":\"0x%08" PRIx32 "\"}", offensive_get_mode());
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_get_mode(const char *method, const char *params_json,
+                                         char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    snprintf(out, outsz, "{\"mode\":\"0x%08" PRIx32 "\"}", offensive_get_mode());
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_pmkid(const char *method, const char *params_json,
+                                     char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_pmkid_t pmkid;
+    if (offensive_get_pmkid(&pmkid) != ESP_OK || !pmkid.valid) {
+        snprintf(out, outsz, "{\"error\":\"no_pmkid\"}");
+        return ESP_ERR_NOT_FOUND;
+    }
+    snprintf(out, outsz, "{\"ap_bssid\":\"" MACSTR "\",\"pmkid\":\"", MAC2STR(pmkid.ap_bssid));
+    for (int i = 0; i < 16 && i < (int)outsz - 8; i++) {
+        int n = strlen(out);
+        snprintf(out + n, outsz - n, "%02x", pmkid.pmkid[i]);
+    }
+    int n = strlen(out);
+    snprintf(out + n, outsz - n, "\"}");
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_sae(const char *method, const char *params_json,
+                                   char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_sae_timing_t t;
+    offensive_get_sae_timing(&t);
+    snprintf(out, outsz,
+        "{\"delta_ms\":%" PRIu32 ",\"ap_bssid\":\"" MACSTR "\"}",
+        t.delta_us, MAC2STR(t.ap_bssid));
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_dragonfly(const char *method, const char *params_json,
+                                         char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_dragonfly_t d;
+    if (offensive_get_dragonfly(&d) != ESP_OK || !d.valid) {
+        snprintf(out, outsz, "{\"error\":\"no_dragonfly\"}");
+        return ESP_ERR_NOT_FOUND;
+    }
+    snprintf(out, outsz,
+        "{\"ap_bssid\":\"" MACSTR "\",\"ssid\":\"%s\"}",
+        MAC2STR(d.ap_bssid), d.ssid);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_ft(const char *method, const char *params_json,
+                                  char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_ft_t ft;
+    if (offensive_get_ft(&ft) != ESP_OK || !ft.valid) {
+        snprintf(out, outsz, "{\"error\":\"no_ft\"}");
+        return ESP_ERR_NOT_FOUND;
+    }
+    snprintf(out, outsz,
+        "{\"ap_bssid\":\"" MACSTR "\",\"sta_mac\":\"" MACSTR "\","
+        "\"reassoc_ms\":%" PRIu32 "}",
+        MAC2STR(ft.ap_bssid), MAC2STR(ft.sta_mac), ft.reassoc_time_us);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_11k(const char *method, const char *params_json,
+                                   char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_11k_t k;
+    offensive_get_11k(&k);
+    snprintf(out, outsz,
+        "{\"target_bssid\":\"" MACSTR "\",\"neighbor_bssid\":\"" MACSTR "\","
+        "\"channel\":%d}",
+        MAC2STR(k.target_bssid), MAC2STR(k.neighbor_bssid), k.channel);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_11v(const char *method, const char *params_json,
+                                   char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_11v_t v;
+    offensive_get_11v(&v);
+    snprintf(out, outsz,
+        "{\"ap_bssid\":\"" MACSTR "\",\"target_bssid\":\"" MACSTR "\","
+        "\"disassoc_timer\":%d}",
+        MAC2STR(v.ap_bssid), MAC2STR(v.target_bssid), v.disassoc_timer);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_wps(const char *method, const char *params_json,
+                                   char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_wps_t w;
+    if (offensive_get_wps(&w) != ESP_OK || !w.valid) {
+        snprintf(out, outsz, "{\"error\":\"no_wps\"}");
+        return ESP_ERR_NOT_FOUND;
+    }
+    snprintf(out, outsz,
+        "{\"ap_bssid\":\"" MACSTR "\",\"m1_len\":%d}",
+        MAC2STR(w.ap_bssid), w.m1_len);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_eap(const char *method, const char *params_json,
+                                   char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    off_eap_t e;
+    offensive_get_eap(&e);
+    snprintf(out, outsz,
+        "{\"ap_bssid\":\"" MACSTR "\",\"sta_mac\":\"" MACSTR "\","
+        "\"bytes\":%d}",
+        MAC2STR(e.ap_bssid), MAC2STR(e.sta_mac), e.challenge_len);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_json(const char *method, const char *params_json,
+                                    char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    offensive_json(out, outsz);
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_status(const char *method, const char *params_json,
+                                      char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    snprintf(out, outsz, "{\"enabled\":%s}", offensive_get_mode() ? "true" : "false");
+    return ESP_OK;
+}
+
+static esp_err_t rpc_offensive_clear(const char *method, const char *params_json,
+                                     char *out, size_t outsz)
+{
+    (void)method; (void)params_json;
+    offensive_deinit();
+    snprintf(out, outsz, "{\"status\":\"cleared\"}");
+    return ESP_OK;
 }
 
 /*============================================================================*/
@@ -2043,7 +2377,20 @@ static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap
     table[63].name = "export.start";    table[63].fn = rpc_export_start;    table[63].user_ctx = NULL;
     table[64].name = "export.stop";     table[64].fn = rpc_export_stop;     table[64].user_ctx = NULL;
     table[65].name = "export.stats";    table[65].fn = rpc_export_stats;    table[65].user_ctx = NULL;
-    return 66;
+    table[66].name = "offensive.set_mode"; table[66].fn = rpc_offensive_set_mode; table[66].user_ctx = NULL;
+    table[67].name = "offensive.get_mode"; table[67].fn = rpc_offensive_get_mode; table[67].user_ctx = NULL;
+    table[68].name = "offensive.pmkid";    table[68].fn = rpc_offensive_pmkid;    table[68].user_ctx = NULL;
+    table[69].name = "offensive.sae";      table[69].fn = rpc_offensive_sae;      table[69].user_ctx = NULL;
+    table[70].name = "offensive.dragonfly"; table[70].fn = rpc_offensive_dragonfly; table[70].user_ctx = NULL;
+    table[71].name = "offensive.ft";        table[71].fn = rpc_offensive_ft;        table[71].user_ctx = NULL;
+    table[72].name = "offensive.11k";       table[72].fn = rpc_offensive_11k;       table[72].user_ctx = NULL;
+    table[73].name = "offensive.11v";       table[73].fn = rpc_offensive_11v;       table[73].user_ctx = NULL;
+    table[74].name = "offensive.wps";       table[74].fn = rpc_offensive_wps;       table[74].user_ctx = NULL;
+    table[75].name = "offensive.eap";       table[75].fn = rpc_offensive_eap;       table[75].user_ctx = NULL;
+    table[76].name = "offensive.json";      table[76].fn = rpc_offensive_json;      table[76].user_ctx = NULL;
+    table[77].name = "offensive.status";    table[77].fn = rpc_offensive_status;    table[77].user_ctx = NULL;
+    table[78].name = "offensive.clear";     table[78].fn = rpc_offensive_clear;     table[78].user_ctx = NULL;
+    return 79;
 }
 
 static uint16_t build_wifi_methods(jsonrpc_method_entry_t *table, uint16_t cap)
