@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -45,10 +46,19 @@ bool usb_cdc_break_signaled(void);
 void usb_cdc_break_clear(void);
 esp_err_t usb_cdc_break_to_json(char *buf, size_t bufsz);
 
+/* RX API */
+uint32_t usb_cdc_read_available(void);
+uint32_t usb_cdc_read(uint8_t *buf, uint32_t len);
+
+/* TX API */
 bool usb_cdc_write_available(size_t needed_bytes);
 esp_err_t usb_cdc_write(const uint8_t *buf, size_t len);
 void usb_cdc_flow_resume(void);
 size_t usb_cdc_tx_pending(void);
+
+/* State callbacks (called from TinyUSB callbacks) */
+void usb_cdc_set_dtr_rts(bool dtr, bool rts);
+void usb_cdc_break_signal(void);
 
 esp_err_t usb_cdc_get_capabilities(usb_cdc_caps_t *out);
 esp_err_t usb_cdc_caps_to_json(char *buf, size_t bufsz);

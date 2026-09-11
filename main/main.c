@@ -1,29 +1,21 @@
 /*
  * ============================================================================
- *  ESP32-S3 · WIRELESS LAB TOOLKIT · main.c                           v1.0
+ *  ESP32-S3 · WIRELESS LAB TOOLKIT · main.c
  * ============================================================================
  *  Target   : ESP32-S3-N16R8  (16 MB Flash · 8 MB PSRAM)
- *  Interface: USB-OTG CDC  —  connect phone with OTG adapter, open any
- *             serial terminal at 115 200 baud, then type  help  to start
+ *  Interface: USB-OTG CDC / UART CLI
  *
- *  Capabilities at a glance
- *  ─────────────────────────
- *  · 802.11bgn promiscuous sniffer — AP/client discovery · PCAP export
- *  · BLE 5.0 active scanner — vendor OUI lookup · tracker heuristics
- *  · ARP poison + relay — full MITM for victim/gateway pair
- *  · WPA-2 EAPOL handshake capture + offline dictionary attack
- *  · HTTP credential sniffer — Basic-Auth / form field / session cookie
- *  · Deauth engine — targeted client kick or broadcast flood
- *  · Beacon spam · Rogue AP clone · Evil captive portal
- *  · Probe-request flood · Deauth-on-join sentry
- *  · 2 MiB PCAP ring-buffer in PSRAM + SD-card file export
- *  · Full interactive serial CLI — no recompile needed for any feature
+ *  Notes:
+ *    - When USB CDC is detected, the firmware assumes machine/control mode.
+ *    - ANSI console output is suppressed in machine mode.
+ *    - JSON-RPC initialization must be wired here before production use.
  * ============================================================================
  */
 
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stdbool.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -32,76 +24,185 @@
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
 #include "esp_idf_version.h"
+#include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
 
 #include "helper.h"   /* aggregate include — pulls in every module header */
 
+#define TAG "main"
+
 /* ═══════════════════════════════════════════════════════════════════════════
- *  ANSI colour macros  (keep short for readable printf lines)
+ *  ANSI colour macros
  * ═══════════════════════════════════════════════════════════════════════════ */
-#define R0   "\033[0m"          /* reset             */
-#define RB   "\033[1m"          /* bold              */
-#define RED  "\033[91m"         /* bright red        */
-#define GRN  "\033[92m"         /* bright green      */
-#define YLW  "\033[93m"         /* bright yellow     */
-#define BLU  "\033[94m"         /* bright blue       */
-#define MAG  "\033[95m"         /* bright magenta    */
-#define CYN  "\033[96m"         /* bright cyan       */
-#define WHT  "\033[97m"         /* bright white      */
-#define GRY  "\033[90m"         /* dark grey         */
+
+#define UI_RESET   "\033[0m"
+#define UI_BOLD    "\033[1m"
+#define UI_RED     "\033[91m"
+#define UI_GREEN   "\033[92m"
+#define UI_YELLOW  "\033[93m"
+#define UI_BLUE    "\033[94m"
+#define UI_MAGENTA "\033[95m"
+#define UI_CYAN    "\033[96m"
+#define UI_WHITE   "\033[97m"
+#define UI_GRAY    "\033[90m"
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Build-time constants
  * ═══════════════════════════════════════════════════════════════════════════ */
-#define RING_BYTES       (2UL * 1024UL * 1024UL)  /* PCAP ring in PSRAM  */
-#define BOOT_SCAN_SECS   4                         /* quick startup scan  */
+
+#define RING_BYTES       (2UL * 1024UL * 1024UL)  /* PCAP ring in PSRAM */
+#define BOOT_SCAN_SECS   4                         /* quick startup scan */
 #define BOX_W            70                        /* terminal line width */
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  Small formatting helpers
+ *  Boot state
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Print a horizontal divider of `ch` characters */
-static void _hr(const char *ch)
-{
-    printf(GRY "  ");
-    for (int i = 0; i < BOX_W - 2; i++) fputs(ch, stdout);
-    printf(R0 "\n");
-}
+static bool s_machine_mode = false;      /* true when phone/CDC control expected */
+static bool s_boot_failed = false;       /* critical init failure */
+static bool s_boot_degraded = false;     /* optional module failure */
+static bool s_led_ready = false;         /* LED module successfully initialized */
 
-/* Open a named section block */
-static void _section(const char *title)
-{
-    printf(CYN "\n  ┌─ " RB WHT "%s" R0 "\n", title);
-}
+static port_detect_result_t s_port = {0};
 
-/* Single init status row — optional=true means failure is just a warning */
-static void _init_row(const char *label, esp_err_t e, bool optional)
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  Small UI helpers
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void ui_hr(const char *ch)
 {
-    if (e == ESP_OK || e == ESP_ERR_INVALID_STATE) {
-        printf("  " CYN "│" R0 "  " GRN "✔" R0 "  %-45s " GRN "OK" R0 "\n", label);
-    } else if (optional) {
-        printf("  " CYN "│" R0 "  " YLW "⚠" R0 "  %-45s " YLW "skip" GRY "  (%s)" R0 "\n",
-               label, esp_err_to_name(e));
-    } else {
-        printf("  " CYN "│" R0 "  " RED "✖" R0 "  %-45s " RED "FAIL" GRY "  [%s]" R0 "\n",
-               label, esp_err_to_name(e));
+    if (s_machine_mode) {
+        return;
     }
+
+    printf(UI_GRAY "  ");
+    for (int i = 0; i < BOX_W - 2; i++) {
+        fputs(ch, stdout);
+    }
+    printf(UI_RESET "\n");
 }
 
-/* Key / value info row inside a section */
-static void _kv(const char *key, const char *val)
+static void ui_section(const char *title)
 {
-    printf("  " CYN "│" R0 "  " GRY "%-24s" R0 WHT "%s" R0 "\n", key, val);
+    if (s_machine_mode) {
+        return;
+    }
+
+    printf(UI_CYAN "\n  ┌─ " UI_BOLD UI_WHITE "%s" UI_RESET "\n", title);
 }
 
-/* Capability bullet — icon, label, description */
-static void _cap(const char *icon, const char *label, const char *desc)
+static void ui_kv(const char *key, const char *val)
 {
-    printf("  " CYN "│" R0 "  %s  " RB WHT "%-22s" R0 GRY "%s" R0 "\n",
+    if (s_machine_mode) {
+        return;
+    }
+
+    printf("  " UI_CYAN "│" UI_RESET "  " UI_GRAY "%-24s" UI_RESET UI_WHITE "%s" UI_RESET "\n",
+           key, val);
+}
+
+static void ui_cap(const char *icon, const char *label, const char *desc)
+{
+    if (s_machine_mode) {
+        return;
+    }
+
+    printf("  " UI_CYAN "│" UI_RESET "  %s  " UI_BOLD UI_WHITE "%-22s" UI_RESET UI_GRAY "%s" UI_RESET "\n",
            icon, label, desc);
+}
+
+static void init_report(const char *label, esp_err_t err, bool optional)
+{
+    if (err == ESP_OK) {
+        if (!s_machine_mode) {
+            printf("  " UI_CYAN "│" UI_RESET "  " UI_GREEN "✔" UI_RESET
+                   "  %-45s " UI_GREEN "OK" UI_RESET "\n",
+                   label);
+        }
+        return;
+    }
+
+    if (err == ESP_ERR_INVALID_STATE) {
+        if (!s_machine_mode) {
+            printf("  " UI_CYAN "│" UI_RESET "  " UI_BLUE "✔" UI_RESET
+                   "  %-45s " UI_BLUE "already" UI_RESET "\n",
+                   label);
+        } else {
+            ESP_LOGI(TAG, "%s already initialized", label);
+        }
+        return;
+    }
+
+    if (optional) {
+        s_boot_degraded = true;
+
+        if (!s_machine_mode) {
+            printf("  " UI_CYAN "│" UI_RESET "  " UI_YELLOW "⚠" UI_RESET
+                   "  %-45s " UI_YELLOW "skip" UI_GRAY "  (%s)" UI_RESET "\n",
+                   label, esp_err_to_name(err));
+        }
+
+        ESP_LOGW(TAG, "Optional init skipped: %s (%s)", label, esp_err_to_name(err));
+        return;
+    }
+
+    s_boot_failed = true;
+
+    if (!s_machine_mode) {
+        printf("  " UI_CYAN "│" UI_RESET "  " UI_RED "✖" UI_RESET
+               "  %-45s " UI_RED "FAIL" UI_GRAY "  [%s]" UI_RESET "\n",
+               label, esp_err_to_name(err));
+    }
+
+    ESP_LOGE(TAG, "Critical init failed: %s (%s)", label, esp_err_to_name(err));
+}
+
+#define BOOT_INIT(label, expr, optional)                    \
+    do {                                                    \
+        esp_err_t boot_init_err = (expr);                   \
+        init_report((label), boot_init_err, (optional));    \
+    } while (0)
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  NVS bootstrap
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static esp_err_t bootstrap_nvs(void)
+{
+    esp_err_t err = nvs_flash_init();
+
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition invalid (%s); erasing and retrying", esp_err_to_name(err));
+
+        esp_err_t erase_err = nvs_flash_erase();
+        if (erase_err != ESP_OK) {
+            return erase_err;
+        }
+
+        err = nvs_flash_init();
+    }
+
+    return err;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  Formatting helpers
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static void format_mac(char *out, size_t out_len, const uint8_t mac[6])
+{
+    if (out == NULL || out_len < 18) {
+        if (out != NULL && out_len > 0) {
+            out[0] = '\0';
+        }
+        return;
+    }
+
+    snprintf(out, out_len, "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -110,43 +211,44 @@ static void _cap(const char *icon, const char *label, const char *desc)
 
 static void print_banner(void)
 {
-    /* Clear the screen for a clean boot look */
+    if (s_machine_mode) {
+        return;
+    }
+
+    /* Clear screen for clean boot look. */
     printf("\033[2J\033[H");
 
     puts("");
 
-    /* Top border */
-    printf(CYN
+    printf(UI_CYAN
         "  ╔══════════════════════════════════════════════════════════════════╗\n"
         "  ║                                                                  ║\n"
-    R0);
+    UI_RESET);
 
-    /* Project logo: simple wide-spaced typographic style */
-    printf(CYN "  ║  " R0 YLW RB
+    printf(UI_CYAN "  ║  " UI_RESET UI_YELLOW UI_BOLD
         "   W . L . A . B   ·   W I R E L E S S   L A B   T K   "
-    R0 CYN "  ║\n" R0);
+    UI_RESET UI_CYAN "  ║\n" UI_RESET);
 
-    printf(CYN "  ║  " R0 GRY
+    printf(UI_CYAN "  ║  " UI_RESET UI_GRAY
         "                  E S P 3 2 - S 3  ·  N 1 6 R 8              "
-    R0 CYN "  ║\n" R0);
+    UI_RESET UI_CYAN "  ║\n" UI_RESET);
 
-    /* Horizontal separator line inside box */
-    printf(CYN
+    printf(UI_CYAN
         "  ║                                                                  ║\n"
         "  ╠══════════════════════════════════════════════════════════════════╣\n"
-    R0);
+    UI_RESET);
 
-    /* Tagline rows */
-    printf(CYN "  ║  " R0 GRY
+    printf(UI_CYAN "  ║  " UI_RESET UI_GRAY
         "  802.11bgn Sniffer  ·  BLE 5.0  ·  ARP MITM  ·  WPA2 Crack    "
-    R0 CYN "║\n" R0);
-    printf(CYN "  ║  " R0 GRY
-        "  PCAP Ring  ·  Deauth  ·  Evil Portal  ·  Cred Sniffer         "
-    R0 CYN "║\n" R0);
+    UI_RESET UI_CYAN "║\n" UI_RESET);
 
-    printf(CYN
+    printf(UI_CYAN "  ║  " UI_RESET UI_GRAY
+        "  PCAP Ring  ·  Deauth  ·  Evil Portal  ·  Cred Sniffer         "
+    UI_RESET UI_CYAN "║\n" UI_RESET);
+
+    printf(UI_CYAN
         "  ╚══════════════════════════════════════════════════════════════════╝\n"
-    R0);
+    UI_RESET);
 
     puts("");
 }
@@ -157,65 +259,72 @@ static void print_banner(void)
 
 static void print_sysinfo(void)
 {
-    _section("Hardware · Firmware");
+    if (s_machine_mode) {
+        return;
+    }
 
-    esp_chip_info_t ci;
+    ui_section("Hardware · Firmware");
+
+    esp_chip_info_t ci = {0};
     esp_chip_info(&ci);
 
-    uint32_t flash_kb = 0;
-    {
-        uint32_t fsz = 0;
-        if (esp_flash_get_size(NULL, &fsz) == ESP_OK)
-            flash_kb = fsz / 1024;
+    uint32_t flash_size = 0;
+    if (esp_flash_get_size(NULL, &flash_size) != ESP_OK) {
+        flash_size = 0;
     }
+
+    uint32_t flash_kb = flash_size / 1024;
 
     size_t int_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
     size_t int_free  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     size_t ps_total  = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
     size_t ps_free   = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
 
-    uint8_t mac_sta[6], mac_ap[6], mac_bt[6];
-    esp_read_mac(mac_sta, ESP_MAC_WIFI_STA);
-    esp_read_mac(mac_ap,  ESP_MAC_WIFI_SOFTAP);
-    esp_read_mac(mac_bt,  ESP_MAC_BT);
+    uint8_t mac_sta[6] = {0};
+    uint8_t mac_ap[6]  = {0};
+    uint8_t mac_bt[6]  = {0};
+
+    if (esp_read_mac(mac_sta, ESP_MAC_WIFI_STA) != ESP_OK) {
+        memset(mac_sta, 0, sizeof(mac_sta));
+    }
+
+    if (esp_read_mac(mac_ap, ESP_MAC_WIFI_SOFTAP) != ESP_OK) {
+        memset(mac_ap, 0, sizeof(mac_ap));
+    }
+
+    if (esp_read_mac(mac_bt, ESP_MAC_BT) != ESP_OK) {
+        memset(mac_bt, 0, sizeof(mac_bt));
+    }
 
     char buf[80];
+    char mac_str[24];
 
-    snprintf(buf, sizeof(buf), "ESP32-S3  rev %d  ·  %d cores", ci.revision, ci.cores);
-    _kv("Chip :", buf);
+    snprintf(buf, sizeof(buf), "ESP32-S3 rev %d · %d cores", ci.revision, ci.cores);
+    ui_kv("Chip :", buf);
 
     snprintf(buf, sizeof(buf), "%" PRIu32 " kB", flash_kb);
-    _kv("Flash :", buf);
+    ui_kv("Flash :", buf);
 
-    snprintf(buf, sizeof(buf), "%zu kB free  /  %zu kB total",
+    snprintf(buf, sizeof(buf), "%zu kB free / %zu kB total",
              int_free / 1024, int_total / 1024);
-    _kv("Internal RAM :", buf);
+    ui_kv("Internal RAM :", buf);
 
-    snprintf(buf, sizeof(buf), "%zu kB free  /  %zu kB total",
+    snprintf(buf, sizeof(buf), "%zu kB free / %zu kB total",
              ps_free / 1024, ps_total / 1024);
-    _kv("PSRAM :", buf);
+    ui_kv("PSRAM :", buf);
 
-    _kv("IDF Version :", IDF_VER);
+    ui_kv("IDF Version :", IDF_VER);
 
-    snprintf(buf, sizeof(buf),
-             "%02X:%02X:%02X:%02X:%02X:%02X",
-             mac_sta[0], mac_sta[1], mac_sta[2],
-             mac_sta[3], mac_sta[4], mac_sta[5]);
-    _kv("MAC · STA :", buf);
+    format_mac(mac_str, sizeof(mac_str), mac_sta);
+    ui_kv("MAC · STA :", mac_str);
 
-    snprintf(buf, sizeof(buf),
-             "%02X:%02X:%02X:%02X:%02X:%02X",
-             mac_ap[0], mac_ap[1], mac_ap[2],
-             mac_ap[3], mac_ap[4], mac_ap[5]);
-    _kv("MAC · SoftAP :", buf);
+    format_mac(mac_str, sizeof(mac_str), mac_ap);
+    ui_kv("MAC · SoftAP :", mac_str);
 
-    snprintf(buf, sizeof(buf),
-             "%02X:%02X:%02X:%02X:%02X:%02X",
-             mac_bt[0], mac_bt[1], mac_bt[2],
-             mac_bt[3], mac_bt[4], mac_bt[5]);
-    _kv("MAC · BT :", buf);
+    format_mac(mac_str, sizeof(mac_str), mac_bt);
+    ui_kv("MAC · BT :", mac_str);
 
-    printf("  " CYN "│" R0 "\n");
+    printf("  " UI_CYAN "│" UI_RESET "\n");
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -224,142 +333,202 @@ static void print_sysinfo(void)
 
 static void run_init_sequence(void)
 {
-    _section("Module Initialisation");
+    ui_section("Module Initialisation");
 
-    /* ── 3. USB transport detection ───────────────────────────────────── */
-    port_detect_result_t port = {0};
-    boot_port_detect(&port);
-    port_print_banner(&port);
-
-    /* ── 3b. NVS persistence ─────────────────────────────────────────── */
-    _init_row("NVS Persistence  (settings/targets)",
-              nvs_persist_init(), true);
-
-    /* Choose console path:
-     * - If CDC-ACM is active, this device is being controlled by a phone;
-     *   keep UART0 quiet and let the JSON-RPC dispatcher handle I/O.
-     * - Otherwise use the traditional UART0 CLI.
-     */
-    if (port.active == PORT_TRANSPORT_CDC) {
-        printf("  │  Active path is USB-OTG CDC-ACM. ");
-        printf("Use the companion app for control.\n");
+    if (!s_machine_mode) {
+        port_print_banner(&s_port);
+    } else {
+        ESP_LOGI(TAG, "Port detection complete; active transport=%d", (int)s_port.active);
     }
 
-    /* ── 4. LED indicator ─────────────────────────────────────────────── */
-    _init_row("LED Indicator (WS2812, GPIO 48)",
-              helper_init(), false);
+    BOOT_INIT("NVS Persistence (settings/targets)", nvs_persist_init(), true);
 
-    /* Boot LED: rapid cyan pulse to signal start */
-    led_set_rgb(0, 200, 255);
-    vTaskDelay(pdMS_TO_TICKS(120));
-    led_set_state(LED_STATE_SCANNING);
+    if (s_port.active == PORT_TRANSPORT_CDC) {
+        ESP_LOGI(TAG, "USB CDC active: companion app/JSON-RPC transport expected");
+    }
 
-    /* ── 5. SD card (optional — device works fine without it) ─────────── */
-    _init_row("SD Card Storage  (SPI2, /sd)",
-              storage_init(), true);
+    /* LED indicator */
+    esp_err_t led_err = helper_init();
+    init_report("LED Indicator (WS2812, GPIO 48)", led_err, false);
 
-    /* ── 5b. SPIFFS storage (wordlists, blobs) ───────────────────────── */
-    _init_row("SPIFFS Wordlist Store  (5 MiB)",
-              storage_spiffs_init(), true);
+    if (led_err == ESP_OK || led_err == ESP_ERR_INVALID_STATE) {
+        s_led_ready = true;
+        led_set_rgb(0, 200, 255);
+        vTaskDelay(pdMS_TO_TICKS(120));
+        led_set_state(LED_STATE_SCANNING);
+    }
 
-    /* ── 5c. OTA updater ─────────────────────────────────────────────── */
-    _init_row("OTA Updater  (HTTP + RSA-2048)",
-              ota_http_init(), false);
+    /* Core system services */
+    BOOT_INIT("Structured Logging (ring + JSON)", structured_log_init(), false);
+    BOOT_INIT("Watchdog + Panic Handler", watchdog_init(), false);
+    BOOT_INIT("Health Telemetry (heap/PSRAM/temp/uptime)", health_telemetry_init(), false);
 
-    /* ── 5d. Watchdog + Panic Handler ───────────────────────────────── */
-    _init_row("Watchdog + Panic Handler",
-              watchdog_init(), false);
+    /*
+     * USB CDC is critical in machine mode, optional in UART CLI mode.
+     */
+    BOOT_INIT("USB CDC-ACM Custom VID/PID", usb_cdc_init(), !s_machine_mode);
 
-    /* ── 5e. Structured logging ────────────────────────────────────── */
-    _init_row("Structured Logging  (ring + JSON)",
-              structured_log_init(), false);
+    /*
+     * TODO: initialize JSON-RPC server here.
+     *
+     * This is currently missing from the boot flow.
+     * Without JSON-RPC initialization, phone control over USB CDC will not work.
+     *
+     * Likely future calls:
+     *
+     *   BOOT_INIT("JSON-RPC Server", jsonrpc_init(), false);
+     *   BOOT_INIT("JSON-RPC Schema", jsonrpc_schema_init(), false);
+     *
+     * The exact function names depend on jsonrpc.h / jsonrpc_schema.h.
+     */
+    if (s_port.active == PORT_TRANSPORT_CDC) {
+        ESP_LOGW(TAG, "JSON-RPC server is not initialized in main.c yet. "
+                      "Phone control will not work until this is wired.");
+    }
 
-    /* ── 5f. USB CDC-ACM custom VID/PID ──────────────────────────────── */
-    _init_row("USB CDC-ACM Custom VID/PID",
-              usb_cdc_init(), false);
+    /* Storage and update services */
+    BOOT_INIT("SD Card Storage (SPI2, /sd)", storage_init(), true);
+    BOOT_INIT("SPIFFS Wordlist Store (5 MiB)", storage_spiffs_init(), true);
+    BOOT_INIT("OTA Updater (HTTP + RSA-2048)", ota_http_init(), true);
 
-    _init_row("Health Telemetry  (heap/PSRAM/temp/uptime)",
-              health_telemetry_init(), false);
+    /* AI / analysis modules */
+    BOOT_INIT("AI Model Zoo", ai_model_zoo_init(), false);
+    BOOT_INIT("AI Classifier", ai_classifier_init(), false);
+    BOOT_INIT("AI Anomaly", ai_anomaly_init(), false);
+    BOOT_INIT("AI Fingerprint", ai_fingerprint_init(), false);
+    BOOT_INIT("AI Channel Predictor", ai_channel_predictor_init(), false);
+    BOOT_INIT("AI Handshake Quality", ai_hs_quality_init(), false);
+    BOOT_INIT("AI Rogue Detector", ai_rogue_detector_init(), false);
+    BOOT_INIT("AI Deauth Predictor", ai_deauth_predictor_init(), false);
+    BOOT_INIT("AI BLE Profiler", ai_ble_profiler_init(), false);
+    BOOT_INIT("AI Training", ai_train_init(), false);
 
-    /* ── 6. Wi-Fi stack ───────────────────────────────────────────────── */
-    _init_row("Wi-Fi Subsystem  (802.11bgn promiscuous)",
-              ai_model_zoo_init(), false);
-              ai_classifier_init(), false);
-              ai_anomaly_init(), false);
-              ai_fingerprint_init(), false);
-              ai_channel_predictor_init(), false);
-              ai_hs_quality_init(), false);
-              ai_rogue_detector_init(), false);
-              ai_deauth_predictor_init(), false);
-              ai_ble_profiler_init(), false);
-              ai_train_init(), false);
-              wardrive_init(), false);
-              attack_planner_init(), false);
-              stealth_init(), false);
-              scheduler_init(), false);
-              reaction_rules_init(), false);
-              export_init(), false);
-              offensive_init(), false);
-              cli_flipper_init(), false);
-              pmkid_init(); sae_sidechannel_init(); dragonfly_sim_init(); ft_roam_init(); neighbor_report_init(); btm_init(); wps_pixiedust_init(); eap_capture_init();
-              coex_init(), false);
-              wifi_sniffer_init(), false);
+    /* Automation / planning / reaction */
+    BOOT_INIT("Wardrive", wardrive_init(), false);
+    BOOT_INIT("Attack Planner", attack_planner_init(), false);
+    BOOT_INIT("Stealth", stealth_init(), false);
+    BOOT_INIT("Scheduler", scheduler_init(), false);
+    BOOT_INIT("Reaction Rules", reaction_rules_init(), false);
 
-    /* ── 7. BLE stack ─────────────────────────────────────────────────── */
-    _init_row("BLE 5.0 Scanner  (NimBLE host)",
-              ble_scanner_init(), false);
-              _init_row("GPS Timestamp Correlator",
-                        gps_init(), false);
+    /* Export / offensive core / CLI bridge */
+    BOOT_INIT("Export", export_init(), false);
+    BOOT_INIT("Offensive Core", offensive_init(), false);
+    BOOT_INIT("CLI Flipper", cli_flipper_init(), false);
 
-    /* ── 8. ARP poison engine ─────────────────────────────────────────── */
-    _init_row("ARP Poison Engine  (MITM + relay)",
-              arp_poison_init(), false);
+    /* Wi-Fi security extensions */
+    BOOT_INIT("PMKID Capture", pmkid_init(), false);
+    BOOT_INIT("SAE Side-Channel", sae_sidechannel_init(), false);
+    BOOT_INIT("Dragonfly Simulator", dragonfly_sim_init(), false);
+    BOOT_INIT("FT Roaming", ft_roam_init(), false);
+    BOOT_INIT("Neighbor Report", neighbor_report_init(), false);
+    BOOT_INIT("BTM", btm_init(), false);
+    BOOT_INIT("WPS Pixie Dust", wps_pixiedust_init(), false);
+    BOOT_INIT("EAP Capture", eap_capture_init(), false);
 
-    /* ── 9. Credential sniffer ────────────────────────────────────────── */
-    _init_row("HTTP Credential Sniffer  (form/cookie/Basic)",
-              creds_init(), false);
+    /*
+     * TODO: audit channel_hopper lifecycle.
+     *
+     * channel_hopper.c is compiled, but no explicit channel_hopper_init()
+     * appears here. It may be managed internally by wifi_sniffer.c, but that
+     * should be made explicit.
+     */
 
-    /* ── 10. WPA handshake capture ─────────────────────────────────────── */
-    _init_row("WPA-2 Handshake Capture + Crack  (EAPOL)",
-              handshake_init(), false);
+    /* Wi-Fi core */
+    BOOT_INIT("Wi-Fi Coexistence", coex_init(), false);
+    BOOT_INIT("Wi-Fi Sniffer", wifi_sniffer_init(), false);
 
-    /* ── 11. PCAP ring buffer in PSRAM ─────────────────────────────────── */
-    _init_row("PCAP Ring Buffer  (2 MiB PSRAM)",
-              pcap_ring_init(RING_BYTES), false);
+    /* BLE core */
+    BOOT_INIT("BLE 5.0 Scanner (NimBLE host)", ble_scanner_init(), false);
+    BOOT_INIT("GPS Timestamp Correlator", gps_init(), false);
 
-    /* ── 12. Interactive serial CLI ────────────────────────────────────── */
-    _init_row("Interactive Serial CLI  (auto-selected transport)",
-              cli_start(), false);
+    /*
+     * TODO: audit BLE submodules.
+     *
+     * These are compiled but not explicitly initialized here:
+     *
+     *   ble_ext_adv.c
+     *   ble_periodic.c
+     *   ble_phy.c
+     *   ble_iso.c
+     *   ble_gatt_client.c
+     *   ble_gatt_enumerator.c
+     *   ble_mitm.c
+     *   ble_rpa_bypass.c
+     *   ble_findmy.c
+     *   ble_smarttag.c
+     *   ble_privacy.c
+     *
+     * If they are started internally by ble_scanner.c, that should be documented.
+     * Otherwise they need explicit lifecycle calls.
+     */
 
-    printf("  " CYN "│" R0 "\n");
+    /* Network attack/capture engines */
+    BOOT_INIT("ARP Poison Engine (MITM + relay)", arp_poison_init(), false);
+    BOOT_INIT("HTTP Credential Sniffer (form/cookie/Basic)", creds_init(), false);
+    BOOT_INIT("WPA-2 Handshake Capture + Crack (EAPOL)", handshake_init(), false);
 
-    /* Settle LEDs to idle */
-    led_set_state(LED_STATE_IDLE);
+    /* Packet capture buffer */
+    BOOT_INIT("PCAP Ring Buffer (2 MiB PSRAM)", pcap_ring_init(RING_BYTES), false);
+
+    /*
+     * In CDC machine mode, JSON-RPC should own the control transport.
+     * CLI is kept for compatibility until JSON-RPC is fully wired.
+     */
+    if (s_port.active == PORT_TRANSPORT_CDC) {
+        ESP_LOGW(TAG, "CDC active: JSON-RPC should own transport. "
+                      "cli_start() is still called for compatibility.");
+    }
+
+    BOOT_INIT("Interactive Serial CLI (auto-selected transport)", cli_start(), false);
+
+    if (!s_machine_mode) {
+        printf("  " UI_CYAN "│" UI_RESET "\n");
+    }
+
+    if (s_led_ready && !s_boot_failed) {
+        led_set_state(LED_STATE_IDLE);
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- *  QUICK BOOT SCAN  –  brief Wi-Fi survey so first output is real data
+ *  QUICK BOOT SCAN
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void run_boot_scan(void)
 {
-    char title[64];
+    if (s_machine_mode || s_boot_failed) {
+        return;
+    }
+
+    char title[128];
     snprintf(title, sizeof(title),
-             "Boot Scan  —  " YLW RB "Wi-Fi" R0 "  (" GRY "passive, %d s" R0 ")",
+             "Boot Scan — " UI_YELLOW UI_BOLD "Wi-Fi" UI_RESET
+             " (" UI_GRAY "passive, %d s" UI_RESET ")",
              BOOT_SCAN_SECS);
-    _section(title);
-    printf("  " CYN "│" R0 "\n");
-    printf("  " CYN "│" R0 "  " GRY "Hopping channels 1-13, gathering nearby APs & clients …" R0 "\n");
-    printf("  " CYN "│" R0 "\n");
 
-    led_set_state(LED_STATE_SCANNING);
+    ui_section(title);
 
-    /* Hopper + sniffer lifecycle now owned by channel_hopper.c */
+    printf("  " UI_CYAN "│" UI_RESET "\n");
+    printf("  " UI_CYAN "│" UI_RESET "  " UI_GRAY
+           "Hopping channels 1-13, gathering nearby APs & clients …"
+           UI_RESET "\n");
+    printf("  " UI_CYAN "│" UI_RESET "\n");
+
+    if (s_led_ready) {
+        led_set_state(LED_STATE_SCANNING);
+    }
+
     esp_err_t r = wifi_sniffer_start(BOOT_SCAN_SECS);
     if (r != ESP_OK) {
-        printf("  " CYN "│" R0 "  " RED "scan skipped: %s" R0 "\n", esp_err_to_name(r));
+        printf("  " UI_CYAN "│" UI_RESET "  " UI_RED "scan skipped: %s" UI_RESET "\n",
+               esp_err_to_name(r));
     } else {
-        /* Wait for the scan to finish (duration + 1s safety margin) */
+        /*
+         * Wait for the scan to finish.
+         *
+         * TODO: replace this delay with a proper completion event/callback
+         * from wifi_sniffer/channel_hopper.
+         */
         vTaskDelay(pdMS_TO_TICKS((BOOT_SCAN_SECS + 1) * 1000));
 
         uint16_t ap_cnt  = wifi_sniffer_get_ap_count();
@@ -367,13 +536,17 @@ static void run_boot_scan(void)
 
         char buf[80];
         snprintf(buf, sizeof(buf),
-                 GRN "%u" R0 " access points  ·  " GRN "%u" R0 " clients",
+                 UI_GREEN "%u" UI_RESET " access points · " UI_GREEN "%u" UI_RESET " clients",
                  ap_cnt, cli_cnt);
-        _kv("Discovered :", buf);
+
+        ui_kv("Discovered :", buf);
     }
 
-    led_set_state(LED_STATE_IDLE);
-    printf("  " CYN "│" R0 "\n");
+    if (s_led_ready) {
+        led_set_state(LED_STATE_IDLE);
+    }
+
+    printf("  " UI_CYAN "│" UI_RESET "\n");
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -382,26 +555,30 @@ static void run_boot_scan(void)
 
 static void print_capabilities(void)
 {
-    _section("Feature Reference  —  type " YLW "help" R0 " for full syntax");
+    if (s_machine_mode) {
+        return;
+    }
 
-    printf("  " CYN "│" R0 "\n");
+    ui_section("Feature Reference — authorized lab use only; type " UI_YELLOW "help" UI_RESET " for syntax");
 
-    _cap(CYN  "◈" R0, "wifi start / pcap",   "promiscuous 802.11 sniffer, optional PCAP to SD");
-    _cap(GRN  "◈" R0, "ble start / results",  "BLE 5.0 scanner with tracker heuristics");
-    _cap(YLW  "◈" R0, "deauth ap / client",   "802.11 deauthentication flood (broadcast or unicast)");
-    _cap(MAG  "◈" R0, "arp poison",           "ARP MITM with transparent relay to gateway");
-    _cap(RED  "◈" R0, "creds on / show",      "HTTP clear-text credential harvester");
-    _cap(CYN  "◈" R0, "pcap start / export",  "ring-buffer capture; export to SD or serial");
-    _cap(GRN  "◈" R0, "beacon spam",          "30-SSID fake-AP flood across target channel");
-    _cap(YLW  "◈" R0, "portal start",         "evil captive portal + DNS hijack on open SoftAP");
-    _cap(MAG  "◈" R0, "rogue start",          "clone any SSID as open or WPA2 SoftAP");
-    _cap(RED  "◈" R0, "probe start",          "randomised probe-request flood");
-    _cap(CYN  "◈" R0, "doj start",            "deauth-on-join sentry — auto-kick new clients");
-    _cap(GRN  "◈" R0, "analyzer",             "per-channel activity dwell analysis (1-13)");
-    _cap(YLW  "◈" R0, "oui <mac>",            "OUI vendor lookup from on-device table");
-    _cap(MAG  "◈" R0, "save wifi / ble",      "write discovered device report to SD card");
+    printf("  " UI_CYAN "│" UI_RESET "\n");
 
-    printf("  " CYN "│" R0 "\n");
+    ui_cap(UI_CYAN "◈" UI_RESET, "wifi start / pcap", "promiscuous 802.11 sniffer, optional PCAP to SD");
+    ui_cap(UI_GREEN "◈" UI_RESET, "ble start / results", "BLE 5.0 scanner with tracker heuristics");
+    ui_cap(UI_YELLOW "◈" UI_RESET, "deauth ap / client", "802.11 deauthentication (authorized lab only)");
+    ui_cap(UI_MAGENTA "◈" UI_RESET, "arp poison", "ARP MITM with transparent relay to gateway");
+    ui_cap(UI_RED "◈" UI_RESET, "creds on / show", "HTTP clear-text credential capture");
+    ui_cap(UI_CYAN "◈" UI_RESET, "pcap start / export", "ring-buffer capture; export to SD or serial");
+    ui_cap(UI_GREEN "◈" UI_RESET, "beacon spam", "fake-AP beacon generation for lab testing");
+    ui_cap(UI_YELLOW "◈" UI_RESET, "portal start", "captive portal testing on owned/open lab AP");
+    ui_cap(UI_MAGENTA "◈" UI_RESET, "rogue start", "SSID clone for authorized rogue-AP testing");
+    ui_cap(UI_RED "◈" UI_RESET, "probe start", "probe-request generation for lab testing");
+    ui_cap(UI_CYAN "◈" UI_RESET, "doj start", "deauth-on-join sentry for controlled lab use");
+    ui_cap(UI_GREEN "◈" UI_RESET, "analyzer", "per-channel activity dwell analysis (1-13)");
+    ui_cap(UI_YELLOW "◈" UI_RESET, "oui <mac>", "OUI vendor lookup from on-device table");
+    ui_cap(UI_MAGENTA "◈" UI_RESET, "save wifi / ble", "write discovered device report to SD card");
+
+    printf("  " UI_CYAN "│" UI_RESET "\n");
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -410,23 +587,42 @@ static void print_capabilities(void)
 
 static void print_ready_footer(void)
 {
-    _hr("─");
+    if (s_machine_mode) {
+        return;
+    }
+
+    ui_hr("─");
 
     printf("\n");
-    printf(GRY "  Uptime      : " R0 WHT "%" PRId64 " ms" R0 "\n",
+    printf(UI_GRAY "  Uptime      : " UI_RESET UI_WHITE "%" PRId64 " ms" UI_RESET "\n",
            esp_timer_get_time() / 1000LL);
 
-    printf(GRY "  PCAP ring   : " R0 WHT "2 MiB ready  " GRY "(pcap start → pcap export)" R0 "\n");
+    printf(UI_GRAY "  PCAP ring   : " UI_RESET UI_WHITE "2 MiB ready  "
+           UI_GRAY "(pcap start → pcap export)" UI_RESET "\n");
 
-    if (storage_is_ready())
-        printf(GRY "  SD card     : " R0 GRN "mounted at /sd" R0 "\n");
-    else
-        printf(GRY "  SD card     : " R0 YLW "not present  " GRY "(insert for file export)" R0 "\n");
+    if (storage_is_ready()) {
+        printf(UI_GRAY "  SD card     : " UI_RESET UI_GREEN "mounted at /sd" UI_RESET "\n");
+    } else {
+        printf(UI_GRAY "  SD card     : " UI_RESET UI_YELLOW "not present  "
+               UI_GRAY "(insert for file export)" UI_RESET "\n");
+    }
+
+    if (s_boot_degraded) {
+        printf(UI_YELLOW "  Boot state  : degraded — one or more optional modules failed" UI_RESET "\n");
+    } else {
+        printf(UI_GREEN "  Boot state  : healthy" UI_RESET "\n");
+    }
 
     printf("\n");
-    printf("  " RB CYN "──────────────────────────────────────────────────────────────" R0 "\n");
-    printf("  " RB WHT "  Console ready.  Type " R0 YLW RB "help" R0 WHT RB " for the full command reference." R0 "\n");
-    printf("  " RB CYN "──────────────────────────────────────────────────────────────" R0 "\n");
+    printf("  " UI_BOLD UI_CYAN
+           "──────────────────────────────────────────────────────────────"
+           UI_RESET "\n");
+    printf("  " UI_BOLD UI_WHITE "  Console ready.  Type " UI_RESET
+           UI_YELLOW UI_BOLD "help" UI_RESET UI_BOLD UI_WHITE
+           " for the full command reference." UI_RESET "\n");
+    printf("  " UI_BOLD UI_CYAN
+           "──────────────────────────────────────────────────────────────"
+           UI_RESET "\n");
     printf("\n");
 }
 
@@ -438,39 +634,71 @@ void app_main(void)
 {
     /*
      * Boot order:
-     *   1. banner
-     *   2. hardware info
-     *   3. init all modules (spawns CLI task internally)
-     *   4. quick passive Wi-Fi scan for an immediate result
-     *   5. capability cheat-sheet
-     *   6. ready prompt — CLI task handles everything from here
-     *
-     * app_main is free to return; FreeRTOS keeps all spawned tasks alive.
+     *   1. NVS bootstrap
+     *   2. transport detection
+     *   3. banner/sysinfo if human console mode
+     *   4. module init
+     *   5. optional quick scan
+     *   6. capability/help footer
      */
 
-    /* ── 1. Banner ────────────────────────────────────────────────────── */
+    esp_err_t nvs_err = bootstrap_nvs();
+    if (nvs_err != ESP_OK) {
+        ESP_LOGE(TAG, "NVS bootstrap failed: %s", esp_err_to_name(nvs_err));
+        s_boot_failed = true;
+    }
+
+    boot_port_detect(&s_port);
+    s_machine_mode = (s_port.active == PORT_TRANSPORT_CDC);
+
+    if (s_machine_mode) {
+        ESP_LOGI(TAG, "Machine mode: USB CDC detected; suppressing ANSI console");
+    }
+
     print_banner();
-
-    /* ── 2. System info ───────────────────────────────────────────────── */
     print_sysinfo();
-
-    /* ── 3. Module init ───────────────────────────────────────────────── */
     run_init_sequence();
 
-    /* ── 4. Quick boot scan ───────────────────────────────────────────── */
-    run_boot_scan();
+    if (!s_boot_failed) {
+        run_boot_scan();
+        print_capabilities();
+        print_ready_footer();
+    } else {
+        ESP_LOGE(TAG, "Critical initialization failure detected");
 
-    /* ── 5. Capabilities ─────────────────────────────────────────────── */
-    print_capabilities();
+        if (!s_machine_mode) {
+            printf("\n  " UI_RED UI_BOLD "Critical initialization failure." UI_RESET "\n");
+            printf("  Check ESP_LOG output and fix failing modules before continuing.\n\n");
+        }
+    }
 
-    /* ── 6. Ready prompt ─────────────────────────────────────────────── */
-    print_ready_footer();
+    if (s_led_ready) {
+        if (s_boot_failed) {
+            led_set_rgb(255, 0, 0);
+        } else if (s_boot_degraded) {
+            led_set_rgb(255, 160, 0);
+        } else {
+            led_set_state(LED_STATE_IDLE);
+        }
+    }
+
+    if (s_boot_failed) {
+        ESP_LOGE(TAG, "Boot finished with critical errors");
+    } else if (s_boot_degraded) {
+        ESP_LOGW(TAG, "Boot finished in degraded state");
+    } else {
+        ESP_LOGI(TAG, "Boot complete");
+    }
 
     /*
-     * app_main returns here — the following tasks are alive and running:
-     *   · cli_task        (pin core 1)  — reads stdin, dispatches commands
-     *   · wifi_worker     (pin core 1)  — processes packet queue
-     *   · led_task        (pin core 1)  — LED animation loop
-     *   · ble_host_task   (NimBLE)      — BLE host stack
+     * app_main returns here.
+     *
+     * Expected long-running tasks:
+     *   - CLI task
+     *   - USB CDC / JSON-RPC task(s)
+     *   - Wi-Fi sniffer/worker task(s)
+     *   - BLE host stack task(s)
+     *   - LED task
+     *   - watchdog/health task(s)
      */
 }
