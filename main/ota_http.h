@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
-#include "common_types.h"
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,9 +20,19 @@ typedef enum {
     OTA_ERR_WRITE = -5,
     OTA_ERR_BOOT = -6,
     OTA_ERR_NO_SLOT = -7,
+    OTA_ERR_NO_PSRAM = -8,
 } ota_status_t;
 
 esp_err_t ota_http_init(void);
+
+/**
+ * @brief Start OTA update in a background task.
+ * 
+ * @param url HTTP URL of the firmware binary.
+ * @param pubkey_der DER-encoded RSA-2048 public key.
+ * @param pubkey_len Length of the public key.
+ * @return OTA_OK if the background task was successfully spawned.
+ */
 ota_status_t ota_http_start(const char *url, const uint8_t *pubkey_der, size_t pubkey_len);
 
 /* Abort in-progress OTA. */

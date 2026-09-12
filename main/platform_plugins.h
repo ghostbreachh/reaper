@@ -27,4 +27,5 @@ esp_err_t platform_plugin_unload(const char *name);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* PLATFORM_PLUGINS_H */

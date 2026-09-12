@@ -3,11 +3,20 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+
 #include "esp_err.h"
+#include "common_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Feature tensor size used by BLE profiler model. */
+#define AI_BLE_PROFILER_FEAT_SZ             8
+
+/* Default model inference divider. */
+#define AI_BLE_PROFILER_DEFAULT_INFER_EVERY 8
 
 /* BLE device type classes. */
 typedef enum {
@@ -36,35 +45,48 @@ typedef struct {
 esp_err_t ai_ble_profiler_init(void);
 
 /**
+ * @brief Deinit profiler.
+ */
+void ai_ble_profiler_deinit(void);
+
+/**
  * @brief Set model name for BLE classifier.
  */
 esp_err_t ai_ble_profiler_set_model(const char *model_name);
 
 /**
- * @brief Classify a BLE device from advertisement data.
+ * @brief Set how often model inference runs.
  *
- * @param mac       Device BLE address
- * @param adv_data  Advertisement payload
- * @param adv_len   Advertisement length
+ * every_n = 1 -> every advertisement
+ * every_n = 8 -> every 8 advertisements
+ */
+esp_err_t ai_ble_profiler_set_infer_every(uint32_t every_n);
+
+/**
+ * @brief Classify a BLE device from scanner info + advertisement data.
+ *
+ * @param info      BLE device info produced by ble_scanner
+ * @param adv_data  Raw advertisement payload
+ * @param adv_len   Advertisement payload length
  * @param out       Output profile
  */
-esp_err_t ai_ble_profiler_classify(const uint8_t *mac,
-                                   const uint8_t *adv_data, size_t adv_len,
+esp_err_t ai_ble_profiler_classify(const ble_info_t *info,
+                                   const uint8_t *adv_data,
+                                   size_t adv_len,
                                    ai_ble_profile_t *out);
 
 /**
- * @brief Convert class enum to human-readable string. */
+ * @brief Convert class enum to human-readable string.
+ */
 const char *ai_ble_profiler_class_name(ai_ble_class_t cls);
 
 /**
- * @brief Return profiler stats as JSON. */
+ * @brief Return profiler stats as JSON.
+ */
 esp_err_t ai_ble_profiler_json(char *buf, size_t bufsz);
-
-/**
- * @brief Deinit profiler. */
-void ai_ble_profiler_deinit(void);
 
 #ifdef __cplusplus
 }
 #endif
+
 #endif /* AI_BLE_PROFILER_H */

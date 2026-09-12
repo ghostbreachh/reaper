@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -22,15 +24,15 @@ typedef struct {
     uint64_t timestamp_us;
     uint8_t  channel;
     int8_t   rssi;
-    uint8_t  pkt_class;   /* from ai_classifier */
+    uint8_t  pkt_class;     /* from ai_classifier */
     float    pkt_confidence;
-    uint8_t  device_class;/* from ai_fingerprint / ai_ble_profiler */
+    uint8_t  device_class;  /* from ai_fingerprint / ai_ble_profiler */
     bool     is_anomaly;
     float    anomaly_score;
     bool     is_rogue;
-    uint8_t  flags;       /* bitmask of extra labels */
-    uint8_t  mac[6];      /* BSSID or BLE MAC */
-    uint8_t  mac_len;     /* 6 for BSSID/BLE, 0 if unknown */
+    uint8_t  flags;         /* bitmask of extra labels */
+    uint8_t  mac[6];        /* BSSID or BLE MAC */
+    uint8_t  mac_len;       /* 6 for BSSID/BLE, 0 if unknown */
 } ai_train_label_t;
 
 /**
@@ -41,39 +43,59 @@ esp_err_t ai_train_init(void);
 /**
  * @brief Start capture in specified mode.
  *
- * Writes PCAP to /sd/train_<timestamp>.pcap and labels to sidecar JSON.
+ * Wi-Fi writes:
+ *   /sd/train_<timestamp>_wifi.pcap
+ *   /sd/train_<timestamp>_wifi.json
+ *
+ * BLE writes:
+ *   /sd/train_<timestamp>_ble.pcap
+ *   /sd/train_<timestamp>_ble.json
  */
 esp_err_t ai_train_start(ai_train_mode_t mode);
 
 /**
- * @brief Stop capture and close files. */
+ * @brief Stop capture and close files.
+ */
 esp_err_t ai_train_stop(void);
 
 /**
- * @brief Label a captured WiFi packet. */
-esp_err_t ai_train_label_wifi(const uint8_t *mac, const uint8_t *frame,
-                              size_t frame_len, uint8_t channel,
-                              int8_t rssi, uint64_t timestamp_us);
+ * @brief Label a captured Wi-Fi packet.
+ *
+ * If mac is NULL, the module attempts to derive BSSID from the frame.
+ */
+esp_err_t ai_train_label_wifi(const uint8_t *mac,
+                              const uint8_t *frame,
+                              size_t frame_len,
+                              uint8_t channel,
+                              int8_t rssi,
+                              uint64_t timestamp_us);
 
 /**
- * @brief Label a captured BLE packet. */
-esp_err_t ai_train_label_ble(const uint8_t *mac, const uint8_t *adv_data,
-                             size_t adv_len, int8_t rssi,
+ * @brief Label a captured BLE packet.
+ */
+esp_err_t ai_train_label_ble(const uint8_t *mac,
+                             const uint8_t *adv_data,
+                             size_t adv_len,
+                             int8_t rssi,
                              uint64_t timestamp_us);
 
 /**
- * @brief Get current capture status. */
+ * @brief Get current capture mode.
+ */
 ai_train_mode_t ai_train_get_mode(void);
 
 /**
- * @brief Return training stats as JSON. */
+ * @brief Return training stats as JSON.
+ */
 esp_err_t ai_train_json(char *buf, size_t bufsz);
 
 /**
- * @brief Deinit training capture. */
+ * @brief Deinit training capture.
+ */
 void ai_train_deinit(void);
 
 #ifdef __cplusplus
 }
 #endif
+
 #endif /* AI_TRAINING_H */

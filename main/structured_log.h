@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,7 +22,7 @@ typedef enum {
 /* Initialize the structured logging subsystem. */
 esp_err_t structured_log_init(void);
 
-/* Write one log entry. */
+/* Write one log entry. Non-blocking; drops entry if lock is contended. */
 void structured_log_write(const char *tag, log_level_t level, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 

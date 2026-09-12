@@ -13,7 +13,8 @@ extern "C" {
 #define SAE_SAMPLES_MAX 64
 
 typedef struct {
-    uint32_t t_us;
+    uint32_t t_us;   /* Timestamp or delta in microseconds */
+    uint32_t ts_ms;  /* Millisecond timestamp for correlation */
     int8_t rssi;
     bool commit;
 } sae_sample_t;
@@ -27,4 +28,5 @@ void sae_sidechannel_clear(void);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* SAE_SIDECHANNEL_H */

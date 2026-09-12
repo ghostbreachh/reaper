@@ -5,19 +5,48 @@
  */
 
 #include "storage_spiffs.h"
+
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <unistd.h>
+
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "esp_err.h"
-#include "esp_timer.h"
-#include "nvs_persist.h"
-#include "string.h"
-#include "stdio.h"
-#include "stdlib.h"
-#include <sys/stat.h>
-#include <dirent.h>
+#include "esp_heap_caps.h"
 
 static const char *TAG = "spiffs";
 static const char *BASE_PATH = "/spiffs";
+
+/* -------------------------------------------------------------------------
+ *  Helpers
+ * ----------------------------------------------------------------------- */
+
+static bool path_is_safe(const char *path)
+{
+    if (path == NULL) return false;
+    /* Prevent directory traversal */
+    if (strstr(path, "..") != NULL) return false;
+    return true;
+}
+
+static void build_full_path(char *out, size_t out_sz, const char *path)
+{
+    if (path[0] == '/') {
+        /* Absolute path provided */
+        snprintf(out, out_sz, "%s", path);
+    } else {
+        /* Relative path provided */
+        snprintf(out, out_sz, "%s/%s", BASE_PATH, path);
+    }
+}
+
+/* -------------------------------------------------------------------------
+ *  Lifecycle
+ * ----------------------------------------------------------------------- */
 
 esp_err_t storage_spiffs_init(void)
 {
@@ -29,28 +58,20 @@ esp_err_t storage_spiffs_init(void)
         .base_path = BASE_PATH,
         .partition_label = "spiffs",
         .max_files = 32,
-        .format_if_mount_failed = false,
+        .format_if_mount_failed = true, /* Auto-format if corrupt/empty */
     };
 
     esp_err_t ret = esp_vfs_spiffs_register(&conf);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SPIFFS mount failed (%s), attempting format", esp_err_to_name(ret));
-        ret = esp_vfs_spiffs_format(conf.partition_label);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "SPIFFS format failed: %s", esp_err_to_name(ret));
-            return ret;
-        }
-        ret = esp_vfs_spiffs_register(&conf);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "SPIFFS re-mount failed after format: %s", esp_err_to_name(ret));
-            return ret;
-        }
+        ESP_LOGE(TAG, "SPIFFS mount failed even after format attempt: %s", esp_err_to_name(ret));
+        return ret;
     }
 
     size_t total = 0, used = 0;
     esp_spiffs_info(NULL, &total, &used);
     ESP_LOGI(TAG, "SPIFFS mounted at %s — %u kB used / %u kB total",
              BASE_PATH, (unsigned)(used / 1024), (unsigned)(total / 1024));
+             
     return ESP_OK;
 }
 
@@ -69,46 +90,71 @@ bool storage_spiffs_is_ready(void)
 
 esp_err_t storage_spiffs_format(void)
 {
+    bool was_mounted = storage_spiffs_is_ready();
+    
+    if (was_mounted) {
+        ESP_LOGW(TAG, "Unmounting SPIFFS for format...");
+        esp_vfs_spiffs_unregister(NULL);
+    }
+
     esp_err_t ret = esp_vfs_spiffs_format(NULL);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "format failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Format failed: %s", esp_err_to_name(ret));
+        /* Attempt to remount even if format failed, to restore state */
+        if (was_mounted) storage_spiffs_init();
         return ret;
     }
-    ESP_LOGI(TAG, "SPIFFS formatted");
+    
+    ESP_LOGI(TAG, "SPIFFS formatted successfully");
+    
+    if (was_mounted) {
+        return storage_spiffs_init();
+    }
+    
     return ESP_OK;
 }
 
+/* -------------------------------------------------------------------------
+ *  File I/O
+ * ----------------------------------------------------------------------- */
+
 esp_err_t storage_spiffs_save_wordlist(const char *path, const void *data, size_t len)
 {
-    if (!path || !data || len == 0) return ESP_ERR_INVALID_ARG;
+    if (!path_is_safe(path) || !data || len == 0) return ESP_ERR_INVALID_ARG;
     if (!storage_spiffs_is_ready()) return ESP_ERR_INVALID_STATE;
 
     char full[128];
-    snprintf(full, sizeof(full), "%s/%s", BASE_PATH, path);
+    build_full_path(full, sizeof(full), path);
 
     FILE *f = fopen(full, "wb");
-    if (!f) return ESP_ERR_NOT_FOUND;
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open %s for writing", full);
+        return ESP_ERR_NOT_FOUND;
+    }
 
     size_t written = fwrite(data, 1, len, f);
+    
+    /* CRITICAL: Flush and sync BEFORE closing to prevent UAF on fileno() */
+    fflush(f);
+    fsync(fileno(f));
     fclose(f);
-    fsync(fileno(f)); // ensure write hits flash
 
     if (written != len) {
-        ESP_LOGE(TAG, "short write %zu/%zu", written, len);
+        ESP_LOGE(TAG, "Short write %zu/%zu to %s", written, len, full);
         return ESP_ERR_INVALID_SIZE;
     }
 
-    ESP_LOGI(TAG, "saved %s (%zu bytes)", full, len);
+    ESP_LOGI(TAG, "Saved %s (%zu bytes)", full, len);
     return ESP_OK;
 }
 
 esp_err_t storage_spiffs_load_wordlist(const char *path, void **data_out, size_t *len_out)
 {
-    if (!path || !data_out || !len_out) return ESP_ERR_INVALID_ARG;
+    if (!path_is_safe(path) || !data_out || !len_out) return ESP_ERR_INVALID_ARG;
     if (!storage_spiffs_is_ready()) return ESP_ERR_INVALID_STATE;
 
     char full[128];
-    snprintf(full, sizeof(full), "%s/%s", BASE_PATH, path);
+    build_full_path(full, sizeof(full), path);
 
     FILE *f = fopen(full, "rb");
     if (!f) return ESP_ERR_NOT_FOUND;
@@ -117,9 +163,17 @@ esp_err_t storage_spiffs_load_wordlist(const char *path, void **data_out, size_t
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    if (sz <= 0 || (size_t)sz > heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)) {
+    if (sz <= 0) {
         fclose(f);
-        return (sz > 0) ? ESP_ERR_NO_MEM : ESP_ERR_INVALID_SIZE;
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    size_t largest_free = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    if ((size_t)sz > largest_free) {
+        ESP_LOGE(TAG, "File %s (%ld bytes) exceeds largest free PSRAM block (%u)", 
+                 full, sz, (unsigned)largest_free);
+        fclose(f);
+        return ESP_ERR_NO_MEM;
     }
 
     void *buf = heap_caps_malloc((size_t)sz, MALLOC_CAP_SPIRAM);
@@ -132,7 +186,7 @@ esp_err_t storage_spiffs_load_wordlist(const char *path, void **data_out, size_t
     fclose(f);
 
     if (rd != (size_t)sz) {
-        free(buf);
+        heap_caps_free(buf);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -145,6 +199,10 @@ void storage_spiffs_free_buffer(void *data)
 {
     if (data) heap_caps_free(data);
 }
+
+/* -------------------------------------------------------------------------
+ *  Directory Listing
+ * ----------------------------------------------------------------------- */
 
 static int list_filter(const struct dirent *d)
 {
@@ -192,9 +250,9 @@ void storage_spiffs_free_list(char **names, size_t count)
 {
     if (!names) return;
     for (size_t i = 0; i < count; i++) {
-        if (names[i]) free(names[i]);
+        if (names[i]) free(names[i]); /* strdup uses standard malloc */
     }
-    heap_caps_free(names);
+    heap_caps_free(names); /* heap_caps_calloc used for the array */
 }
 
 esp_err_t storage_spiffs_usage(uint64_t *total, uint64_t *used)

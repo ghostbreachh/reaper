@@ -11,10 +11,12 @@ extern "C" {
 #endif
 
 esp_err_t platform_fleet_init(void);
+esp_err_t platform_fleet_set_enabled(bool enable);
 esp_err_t platform_fleet_report(void);
 bool platform_fleet_is_enabled(void);
 
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* PLATFORM_FLEET_H */

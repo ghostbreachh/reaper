@@ -27,4 +27,5 @@ esp_err_t platform_config_reset(void);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* PLATFORM_CONFIG_H */

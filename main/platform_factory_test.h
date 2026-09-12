@@ -25,4 +25,5 @@ size_t factory_test_results(char *out, size_t max_len);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* PLATFORM_FACTORY_TEST_H */

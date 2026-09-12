@@ -30,4 +30,5 @@ bool pmkid_has(const uint8_t *bssid, uint8_t *out_pmkid);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* PMKID_H */

@@ -1,192 +1,253 @@
 #include "stealth.h"
-#include "wifi_sniffer.h"
-#include "deauth_engine.h"
-#include "beacon_spam.h"
-#include "extra_offense.h"
+
 #include <string.h>
+#include <stdatomic.h>
+
 #include "esp_log.h"
 #include "esp_err.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
+#include "esp_mac.h" /* For MACSTR / MAC2STR if needed, or manual print */
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "stealth";
 
-static stealth_mode_t g_mode = STEALTH_MODE_OFF;
+/* 
+ * TX Power configuration.
+ * ESP-IDF esp_wifi_set_max_tx_power takes values in 0.25 dBm units.
+ * Example: 19 dBm = 19 * 4 = 76.
+ */
+#define STEALTH_MIN_TX_POWER_DBM  0
+#define STEALTH_MAX_TX_POWER_DBM  19
+
+#define DBM_TO_ESP_IDF(dbm) ((int8_t)((dbm) * 4))
+
+static atomic_int g_mode = STEALTH_MODE_OFF;
 static uint8_t g_factory_mac[6];
-static bool g_factory_mac_saved;
-static SemaphoreHandle_t g_lock;
-static uint32_t g_random_mac_switches;
-static uint32_t g_blocked_tx;
+static bool g_factory_mac_saved = false;
 
-static bool is_local_admin(const uint8_t *mac)
-{
-    return (mac[0] & 0x02) != 0;
-}
+static SemaphoreHandle_t g_lock = NULL;
 
-static void set_random_mac(void)
+static uint32_t g_random_mac_switches = 0;
+static uint32_t g_blocked_tx = 0;
+
+/* -------------------------------------------------------------------------
+ *  Helpers
+ * ----------------------------------------------------------------------- */
+
+static void set_random_mac_internal(void)
 {
     uint8_t mac[6];
     esp_fill_random(mac, 6);
-    mac[0] = (mac[0] & 0xFE) | 0x02; /* locally administered, unicast */
+    
+    /* Set locally administered bit (bit 1), clear multicast bit (bit 0) */
+    mac[0] = (mac[0] & 0xFE) | 0x02; 
+    
     esp_wifi_set_mac(WIFI_IF_STA, mac);
     g_random_mac_switches++;
-    ESP_LOGI(TAG, "random MAC set " MACSTR, MAC2STR(mac));
+    
+    ESP_LOGI(TAG, "Random MAC set: %02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
+
+static esp_err_t set_tx_power_dbm(int8_t dbm)
+{
+    return esp_wifi_set_max_tx_power(DBM_TO_ESP_IDF(dbm));
+}
+
+/* -------------------------------------------------------------------------
+ *  Lifecycle
+ * ----------------------------------------------------------------------- */
 
 esp_err_t stealth_init(void)
 {
+    if (g_lock != NULL) {
+        return ESP_OK;
+    }
+
     g_lock = xSemaphoreCreateMutex();
     if (g_lock == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    g_mode = STEALTH_MODE_OFF;
+
+    atomic_store(&g_mode, STEALTH_MODE_OFF);
     g_factory_mac_saved = false;
     memset(g_factory_mac, 0, sizeof(g_factory_mac));
     g_random_mac_switches = 0;
     g_blocked_tx = 0;
-    ESP_LOGI(TAG, "stealth init");
+    
+    ESP_LOGI(TAG, "Stealth module initialized");
     return ESP_OK;
 }
 
+esp_err_t stealth_deinit(void)
+{
+    if (g_lock == NULL) return ESP_OK;
+
+    stealth_set_mode(STEALTH_MODE_OFF);
+
+    vSemaphoreDelete(g_lock);
+    g_lock = NULL;
+    return ESP_OK;
+}
+
+/* -------------------------------------------------------------------------
+ *  Mode Control
+ * ----------------------------------------------------------------------- */
+
 esp_err_t stealth_set_mode(stealth_mode_t mode)
 {
+    if (g_lock == NULL) return ESP_ERR_INVALID_STATE;
+
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 
-    if (g_mode == mode) {
+    stealth_mode_t current = atomic_load(&g_mode);
+    if (current == mode) {
         xSemaphoreGive(g_lock);
         return ESP_OK;
     }
 
     switch (mode) {
         case STEALTH_MODE_OFF:
-            stealth_restore_mac();
-            stealth_restore_tx_power();
-            g_mode = STEALTH_MODE_OFF;
-            break;
-        case STEALTH_MODE_PASSIVE:
-            if (!g_factory_mac_saved) {
-                esp_wifi_get_mac(WIFI_IF_STA, g_factory_mac);
-                g_factory_mac_saved = true;
+            /* Inline restore to avoid deadlock with public API */
+            if (g_factory_mac_saved) {
+                esp_wifi_set_mac(WIFI_IF_STA, g_factory_mac);
+                ESP_LOGI(TAG, "Factory MAC restored");
             }
-            set_random_mac();
-            stealth_set_min_tx_power();
-            g_mode = STEALTH_MODE_PASSIVE;
+            set_tx_power_dbm(STEALTH_MAX_TX_POWER_DBM);
             break;
+
+        case STEALTH_MODE_PASSIVE:
         case STEALTH_MODE_ACTIVE:
             if (!g_factory_mac_saved) {
                 esp_wifi_get_mac(WIFI_IF_STA, g_factory_mac);
                 g_factory_mac_saved = true;
             }
-            set_random_mac();
-            stealth_set_min_tx_power();
-            g_mode = STEALTH_MODE_ACTIVE;
+            set_random_mac_internal();
+            set_tx_power_dbm(STEALTH_MIN_TX_POWER_DBM);
             break;
+
         default:
             xSemaphoreGive(g_lock);
             return ESP_ERR_INVALID_ARG;
     }
 
-    ESP_LOGI(TAG, "stealth mode -> %s",
+    atomic_store(&g_mode, mode);
+    
+    ESP_LOGI(TAG, "Stealth mode -> %s",
              mode == STEALTH_MODE_OFF ? "off" :
              mode == STEALTH_MODE_PASSIVE ? "passive" : "active");
+             
     xSemaphoreGive(g_lock);
     return ESP_OK;
 }
 
+/* -------------------------------------------------------------------------
+ *  Public Actions
+ * ----------------------------------------------------------------------- */
+
 esp_err_t stealth_set_random_mac(void)
 {
+    if (g_lock == NULL) return ESP_ERR_INVALID_STATE;
+
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
+
     if (!g_factory_mac_saved) {
         esp_wifi_get_mac(WIFI_IF_STA, g_factory_mac);
         g_factory_mac_saved = true;
     }
-    set_random_mac();
+    
+    set_random_mac_internal();
+    
     xSemaphoreGive(g_lock);
     return ESP_OK;
 }
 
 esp_err_t stealth_restore_mac(void)
 {
+    if (g_lock == NULL) return ESP_ERR_INVALID_STATE;
+
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
+
     if (g_factory_mac_saved) {
         esp_wifi_set_mac(WIFI_IF_STA, g_factory_mac);
-        ESP_LOGI(TAG, "factory MAC restored " MACSTR, MAC2STR(g_factory_mac));
+        ESP_LOGI(TAG, "Factory MAC restored");
     }
+    
     xSemaphoreGive(g_lock);
     return ESP_OK;
 }
 
 esp_err_t stealth_set_min_tx_power(void)
 {
-    return esp_wifi_set_max_tx_power(0); /* 0 dBm */
+    return set_tx_power_dbm(STEALTH_MIN_TX_POWER_DBM);
 }
 
 esp_err_t stealth_restore_tx_power(void)
 {
-    return esp_wifi_set_max_tx_power(19); /* 19 dBm default */
+    return set_tx_power_dbm(STEALTH_MAX_TX_POWER_DBM);
 }
+
+/* -------------------------------------------------------------------------
+ *  Status & Checks
+ * ----------------------------------------------------------------------- */
 
 stealth_mode_t stealth_get_mode(void)
 {
-    return g_mode;
+    return (stealth_mode_t)atomic_load(&g_mode);
 }
 
 bool stealth_can_transmit(void)
 {
-    return g_mode == STEALTH_MODE_ACTIVE;
-}
-
-static bool is_active_module(const char *name)
-{
-    if (name == NULL) return false;
-    if (strcmp(name, "deauth") == 0 && deauth_engine_is_active()) return true;
-    if (strcmp(name, "beacon_spam") == 0 && beacon_spam_is_active()) return true;
-    if (strcmp(name, "arp_poison") == 0 && arp_poison_is_active()) return true;
-    if (strcmp(name, "doj") == 0 && doj_is_active()) return true;
-    return false;
+    return atomic_load(&g_mode) == STEALTH_MODE_ACTIVE;
 }
 
 esp_err_t stealth_check_tx(const char *module_name)
 {
-    if (g_mode == STEALTH_MODE_PASSIVE && is_active_module(module_name)) {
-        g_blocked_tx++;
+    (void)module_name; /* Decoupled: we block ALL TX in passive mode */
+
+    if (atomic_load(&g_mode) == STEALTH_MODE_PASSIVE) {
+        if (g_lock) {
+            xSemaphoreTake(g_lock, portMAX_DELAY);
+            g_blocked_tx++;
+            xSemaphoreGive(g_lock);
+        }
         return ESP_ERR_NOT_ALLOWED;
     }
+    
     return ESP_OK;
 }
 
 esp_err_t stealth_json(char *buf, size_t bufsz)
 {
     if (buf == NULL || bufsz == 0) return ESP_ERR_INVALID_ARG;
-    const char *mode_str =
-        g_mode == STEALTH_MODE_OFF ? "off" :
-        g_mode == STEALTH_MODE_PASSIVE ? "passive" : "active";
-    int n = snprintf(buf, bufsz,
-                     "{\"mode\":\"%s\",\"mac_switches\":%u,\"blocked_tx\":%u}",
-                     mode_str, g_random_mac_switches, g_blocked_tx);
-    return (n < 0 || (size_t)n >= bufsz) ? ESP_ERR_NO_MEM : ESP_OK;
-}
+    if (g_lock == NULL) return ESP_ERR_INVALID_STATE;
 
-esp_err_t stealth_deinit(void)
-{
-    if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-    stealth_restore_mac();
-    stealth_restore_tx_power();
-    g_mode = STEALTH_MODE_OFF;
+    stealth_mode_t mode;
+    uint32_t switches;
+    uint32_t blocked;
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    mode = atomic_load(&g_mode);
+    switches = g_random_mac_switches;
+    blocked = g_blocked_tx;
     xSemaphoreGive(g_lock);
-    if (g_lock != NULL) {
-        vSemaphoreDelete(g_lock);
-        g_lock = NULL;
-    }
-    return ESP_OK;
+
+    const char *mode_str =
+        (mode == STEALTH_MODE_OFF) ? "off" :
+        (mode == STEALTH_MODE_PASSIVE) ? "passive" : "active";
+
+    int n = snprintf(buf, bufsz,
+                     "{\"mode\":\"%s\",\"mac_switches\":%"PRIu32",\"blocked_tx\":%"PRIu32"}",
+                     mode_str, switches, blocked);
+                     
+    return (n < 0 || (size_t)n >= bufsz) ? ESP_ERR_NO_MEM : ESP_OK;
 }

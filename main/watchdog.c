@@ -1,105 +1,125 @@
 /*
  * ============================================================================
- *  watchdog.c  —  Watchdog, panic handler, and SPIFFS crash-log persistence
- *
- *  DECISION BLOCK — ToT Branch Selection
- *  -------------------------------------
- *  Requirement: watchdog supervision + panic handler + crash log to SPIFFS.
- *
- *  Branch A — Full ESP-IDF coredump + custom transport to SPIFFS
- *    Pros: complete crash forensics (registers, backtrace, tasks).
- *    Cons: requires coredump partition in partition table + sdkconfig changes;
- *          conflicts with user's "no build / no sdkconfig mutation" workflow.
- *    Decision: REJECTED. Too invasive for current constraints.
- *
- *  Branch B — Application-level task watchdog only
- *    Pros: trivial, uses existing ESP-IDF task WDT.
- *    Cons: no post-mortem data — just resets.
- *    Decision: REJECTED. Does not satisfy crash-log requirement.
- *
- *  Branch C — Custom panic handler + SPIFFS crash log + task WDT subscription
- *    Pros: gives actionable crash log without partition/sdkconfig changes;
- *          lightweight, fits current build policy.
- *    Cons: limited register state compared to full coredump.
- *    Decision: ACCEPTED. Best fit for current phase.
- *
- *  Chosen implementation:
- *    1. Register panic handler that writes minimal crash info to /spiffs/crash.log.
- *    2. Subscribe all critical tasks to task WDT with 5 s timeout.
- *    3. On next boot, detect crash-log presence and present it via CLI/JSON-RPC.
+ *  watchdog.c  —  Watchdog supervisor and post-mortem crash logging
  * ============================================================================
  */
 
 #include "watchdog.h"
+#include "storage_spiffs.h"
+
+#include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <stdatomic.h>
+#include <time.h>
+
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
+#include "esp_timer.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "storage_spiffs.h"
-#include "string.h"
-#include "stdio.h"
-#include <stdatomic.h>
 
 static const char *TAG = "watchdog";
 static const char *CRASH_PATH = "/spiffs/crash.log";
-static atomic_bool g_panic_occurred = ATOMIC_VAR_INIT(false);
-static atomic_bool g_initialized = ATOMIC_VAR_INIT(false);
 
-/* ── Panic handler ────────────────────────────────────────────────────── */
+/* ── Internal Helpers ─────────────────────────────────────────────────── */
 
-static void panic_handler(void)
+static const char* reset_reason_to_str(esp_reset_reason_t reason)
 {
-    uint32_t pc = (uint32_t)__builtin_return_address(0);
-    uint32_t sp = 0;
-    __asm__ volatile ("mov %0, sp" : "=r"(sp));
-    esp_reset_reason_t reason = esp_reset_reason();
+    switch (reason) {
+        case ESP_RST_POWERON:   return "POWERON";
+        case ESP_RST_EXT:       return "EXT";
+        case ESP_RST_SW:        return "SW";
+        case ESP_RST_PANIC:     return "PANIC";
+        case ESP_RST_INT_WDT:   return "INT_WDT";
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";
+        case ESP_RST_WDT:       return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "UNKNOWN";
+    }
+}
 
-    FILE *f = fopen(CRASH_PATH, "w");
-    if (!f) {
-        atomic_store(&g_panic_occurred, true);
+static void write_crash_log_to_spiffs(esp_reset_reason_t reason)
+{
+    if (!storage_spiffs_is_ready()) {
+        ESP_LOGW(TAG, "SPIFFS not ready; cannot persist crash log");
         return;
     }
 
-    fprintf(f, "=== REAPER PANIC ===\n");
-    fprintf(f, "PC: 0x%08x\n", pc);
-    fprintf(f, "SP: 0x%08x\n", sp);
-    fprintf(f, "Reason: %d\n", (int)reason);
-    fprintf(f, "Free heap: %u bytes\n", (unsigned)esp_get_free_heap_size());
-    fprintf(f, "Timestamp: %llu\n", (unsigned long long)esp_timer_get_time());
+    FILE *f = fopen(CRASH_PATH, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open crash log for writing");
+        return;
+    }
+
+    time_t now = time(NULL);
+    struct tm timeinfo;
+    char time_str[32] = "unknown";
+    if (localtime_r(&now, &timeinfo) != NULL) {
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    }
+
+    fprintf(f, "=== REAPER CRASH LOG ===\n");
+    fprintf(f, "Boot Time: %s\n", time_str);
+    fprintf(f, "Reset Reason: %s (%d)\n", reset_reason_to_str(reason), (int)reason);
+    fprintf(f, "Free Heap at Boot: %u bytes\n", (unsigned)esp_get_free_heap_size());
+    fprintf(f, "Min Free Heap: %u bytes\n", (unsigned)esp_get_minimum_free_heap_size());
+    fprintf(f, "Uptime (us): %llu\n", (unsigned long long)esp_timer_get_time());
+    fprintf(f, "\nNote: Full register state requires a coredump partition.\n");
 
     fclose(f);
-    fsync(fileno(f));
-
-    atomic_store(&g_panic_occurred, true);
+    ESP_LOGW(TAG, "Crash log persisted to %s", CRASH_PATH);
 }
 
 /* ── Public API ───────────────────────────────────────────────────────── */
 
 esp_err_t watchdog_init(void)
 {
-    if (atomic_load(&g_initialized)) return ESP_OK;
+    esp_reset_reason_t reason = esp_reset_reason();
 
-    esp_register_shutdown_handler(panic_handler);
+    /* 
+     * SAFE CRASH LOGGING:
+     * Instead of trying to write to SPIFFS while the system is actively 
+     * crashing (which causes hangs/secondary panics), we detect the panic 
+     * on the *next boot* and write the log from a safe task context.
+     */
+    if (reason == ESP_RST_PANIC || 
+        reason == ESP_RST_TASK_WDT || 
+        reason == ESP_RST_INT_WDT || 
+        reason == ESP_RST_WDT) {
+        
+        ESP_LOGW(TAG, "Detected abnormal reset reason: %s", reset_reason_to_str(reason));
+        write_crash_log_to_spiffs(reason);
+    }
 
-    atomic_store(&g_initialized, true);
-    ESP_LOGI(TAG, "Watchdog + panic handler ready");
+    ESP_LOGI(TAG, "Watchdog supervisor initialized");
     return ESP_OK;
 }
 
 void watchdog_task_refresh(const char *task_name)
 {
-    if (!task_name) task_name = "unnamed";
+    (void)task_name; /* Used only for logging if needed */
+
+    TaskHandle_t handle = xTaskGetCurrentTaskHandle();
+    if (handle == NULL) return;
+
     esp_err_t r = esp_task_wdt_reset();
+    
     if (r == ESP_ERR_NOT_FOUND) {
-        esp_task_wdt_add(NULL);
-        esp_task_wdt_reset();
+        /* Task wasn't subscribed yet; subscribe it now */
+        if (esp_task_wdt_add(handle) == ESP_OK) {
+            esp_task_wdt_reset();
+        }
     }
 }
 
 void watchdog_test_panic(void)
 {
-    ESP_LOGE(TAG, "Initiating test panic");
+    ESP_LOGE(TAG, "Initiating test panic via abort()");
     abort();
 }
 
@@ -108,34 +128,34 @@ esp_err_t watchdog_read_crash(char *out, size_t out_len)
     if (!out || !out_len) return ESP_ERR_INVALID_ARG;
     out[0] = '\0';
 
-    if (!atomic_load(&g_panic_occurred)) {
-        snprintf(out, out_len, "No panic recorded since boot.");
-        return ESP_OK;
-    }
-
     FILE *f = fopen(CRASH_PATH, "r");
     if (!f) {
-        snprintf(out, out_len, "Crash log not found.");
+        snprintf(out, out_len, "No crash log found.");
         return ESP_ERR_NOT_FOUND;
     }
 
     size_t rd = fread(out, 1, out_len - 1, f);
     out[rd] = '\0';
     fclose(f);
+    
     return ESP_OK;
 }
 
 void watchdog_clear_crash(void)
 {
-    FILE *f = fopen(CRASH_PATH, "w");
-    if (f) {
-        fclose(f);
+    if (remove(CRASH_PATH) == 0) {
         ESP_LOGI(TAG, "Crash log cleared");
+    } else {
+        ESP_LOGD(TAG, "No crash log to clear");
     }
-    atomic_store(&g_panic_occurred, false);
 }
 
-bool watchdog_had_panic(void)
+bool watchdog_has_crash_log(void)
 {
-    return atomic_load(&g_panic_occurred);
+    FILE *f = fopen(CRASH_PATH, "r");
+    if (f) {
+        fclose(f);
+        return true;
+    }
+    return false;
 }

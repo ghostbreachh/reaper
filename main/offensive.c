@@ -1,74 +1,82 @@
 #include "offensive.h"
 #include "handshake_crack.h"
 #include "wifi_sniffer.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
+#include <inttypes.h>
+#include <stdarg.h>
+
 #include "esp_log.h"
+#include "esp_mac.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+#ifndef MACSTR
+#define MACSTR "%02X:%02X:%02X:%02X:%02X:%02X"
+#define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
+#endif
 
 static const char *TAG = "offensive";
 
-/* Global state — single writer from wifi sniffer task. */
 static uint32_t s_mode = OFF_MODE_NONE;
+static SemaphoreHandle_t s_lock = NULL;
 
-/* Feature state machines. */
 static off_pmkid_t      s_pmkid;
-static off_sae_timing_t  sae_timing;
-static off_dragonfly_t   s_dragonfly;
-static off_ft_t          s_ft;
-static off_11k_t         s_11k;
-static off_11v_t         s_11v;
-static off_wps_t         s_wps;
-static off_eap_t         s_eap;
+static off_sae_timing_t s_sae_timing;
+static off_dragonfly_t  s_dragonfly;
+static off_ft_t         s_ft;
+static off_11k_t        s_11k;
+static off_11v_t        s_11v;
+static off_wps_t        s_wps;
+static off_eap_t        s_eap;
 
-static void reset_pmkid(void)
+/* -------------------------------------------------------------------------
+ *  Helpers
+ * ----------------------------------------------------------------------- */
+
+static bool json_append(char *buf, size_t bufsz, int *n, const char *fmt, ...)
 {
-    memset(&s_pmkid, 0, sizeof(s_pmkid));
-    s_pmkid.valid = false;
+    if (buf == NULL || bufsz == 0 || n == NULL || *n >= (int)bufsz) {
+        return false;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+    int written = vsnprintf(buf + *n, bufsz - (size_t)(*n), fmt, args);
+    va_end(args);
+
+    if (written < 0 || (size_t)(*n + written) >= bufsz) {
+        *n = (int)bufsz - 1;
+        return false;
+    }
+
+    *n += written;
+    return true;
 }
 
-static void reset_sae_timing(void)
-{
-    memset(&sae_timing, 0, sizeof(sae_timing));
-}
-
-static void reset_dragonfly(void)
-{
-    memset(&s_dragonfly, 0, sizeof(s_dragonfly));
-    s_dragonfly.valid = false;
-}
-
-static void reset_ft(void)
-{
-    memset(&s_ft, 0, sizeof(s_ft));
-    s_ft.valid = false;
-}
-
-static void reset_11k(void)
-{
-    memset(&s_11k, 0, sizeof(s_11k));
-}
-
-static void reset_11v(void)
-{
-    memset(&s_11v, 0, sizeof(s_11v));
-}
-
-static void reset_wps(void)
-{
-    memset(&s_wps, 0, sizeof(s_wps));
-    s_wps.valid = false;
-}
-
-static void reset_eap(void)
-{
-    memset(&s_eap, 0, sizeof(s_eap));
-}
+/* -------------------------------------------------------------------------
+ *  Lifecycle
+ * ----------------------------------------------------------------------- */
 
 esp_err_t offensive_init(void)
 {
+    if (s_lock != NULL) {
+        return ESP_OK;
+    }
+
+    s_lock = xSemaphoreCreateMutex();
+    if (s_lock == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    
     memset(&s_pmkid, 0, sizeof(s_pmkid));
-    memset(&sae_timing, 0, sizeof(sae_timing));
+    memset(&s_sae_timing, 0, sizeof(s_sae_timing));
     memset(&s_dragonfly, 0, sizeof(s_dragonfly));
     memset(&s_ft, 0, sizeof(s_ft));
     memset(&s_11k, 0, sizeof(s_11k));
@@ -76,270 +84,267 @@ esp_err_t offensive_init(void)
     memset(&s_wps, 0, sizeof(s_wps));
     memset(&s_eap, 0, sizeof(s_eap));
     s_mode = OFF_MODE_NONE;
+    
+    xSemaphoreGive(s_lock);
+    
+    ESP_LOGI(TAG, "Offensive research module initialized");
     return ESP_OK;
 }
 
 esp_err_t offensive_deinit(void)
 {
-    offensive_init();
+    if (s_lock == NULL) {
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    memset(&s_pmkid, 0, sizeof(s_pmkid));
+    memset(&s_sae_timing, 0, sizeof(s_sae_timing));
+    memset(&s_dragonfly, 0, sizeof(s_dragonfly));
+    memset(&s_ft, 0, sizeof(s_ft));
+    memset(&s_11k, 0, sizeof(s_11k));
+    memset(&s_11v, 0, sizeof(s_11v));
+    memset(&s_wps, 0, sizeof(s_wps));
+    memset(&s_eap, 0, sizeof(s_eap));
+    s_mode = OFF_MODE_NONE;
+    xSemaphoreGive(s_lock);
+
+    vSemaphoreDelete(s_lock);
+    s_lock = NULL;
+    
     return ESP_OK;
 }
 
 esp_err_t offensive_set_mode(uint32_t mode_mask)
 {
+    if (s_lock == NULL) return ESP_ERR_INVALID_STATE;
+    
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     s_mode = mode_mask;
-    ESP_LOGI(TAG, "offensive mode: 0x%08" PRIx32, s_mode);
+    xSemaphoreGive(s_lock);
+    
+    ESP_LOGI(TAG, "Offensive mode set: 0x%08" PRIx32, mode_mask);
     return ESP_OK;
 }
 
 uint32_t offensive_get_mode(void)
 {
-    return s_mode;
+    if (s_lock == NULL) return OFF_MODE_NONE;
+    
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint32_t mode = s_mode;
+    xSemaphoreGive(s_lock);
+    
+    return mode;
 }
 
-/* ---------------------------------------------------------------------------
- *  Generic parser — called from wifi_sniffer on every captured frame.
- * --------------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------
+ *  Packet Feed (Called from Wi-Fi Sniffer Observer)
+ * ----------------------------------------------------------------------- */
+
 esp_err_t offensive_feed(const uint8_t *data, size_t len,
                          const uint8_t *bssid, const uint8_t *sta,
                          uint8_t channel, int8_t rssi, uint64_t ts_us)
 {
-    if (!data || len == 0 || !bssid) {
+    if (s_lock == NULL || !data || len < 24 || !bssid) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    
     if (s_mode == OFF_MODE_NONE) {
+        xSemaphoreGive(s_lock);
         return ESP_OK;
     }
 
-    /* Frame type/subtype from radiotap / 802.11 header offset. */
-    if (len < 26) {
-        return ESP_OK;
-    }
-    uint8_t frame_ctrl = data[24];
-    uint8_t type = (frame_ctrl >> 2) & 0x3;
-    uint8_t subtype = (frame_ctrl >> 4) & 0xF;
+    /* Correct 802.11 Frame Control parsing */
+    uint16_t fc = (uint16_t)(data[0] | (data[1] << 8));
+    uint8_t type = (fc >> 2) & 0x03;
+    uint8_t subtype = (fc >> 4) & 0x0F;
 
-    /* ---------- PMKID (EAPOL M1 with PMKID KDE) ---------- */
+    /* ---------- PMKID (Sync from handshake_crack) ---------- */
     if (s_mode & OFF_MODE_PMKID) {
-        if (type == 2 && subtype == 0x0B && memcmp(bssid, g_hs.ap_mac, 6) == 0) {
-            /* Extract PMKID from existing handshake capture if available. */
-            if (g_hs.has_pmkid && !s_pmkid.valid) {
+        handshake_t hs;
+        if (handshake_get_snapshot(&hs) == ESP_OK && hs.has_pmkid && !s_pmkid.valid) {
+            if (memcmp(hs.ap_mac, bssid, 6) == 0) {
                 memcpy(s_pmkid.ap_bssid, bssid, 6);
-                memcpy(s_pmkid.pmkid, g_hs.pmkid, 16);
-                s_pmkid.capture_time_us = ts_us;
+                memcpy(s_pmkid.pmkid, hs.pmkid, 16);
+                s_pmkid.capture_time_us = (uint32_t)ts_us;
                 s_pmkid.valid = true;
-                ESP_LOGI(TAG, "PMKID captured for "MACSTR"", MAC2STR(bssid));
+                ESP_LOGI(TAG, "PMKID synced for " MACSTR, MAC2STR(bssid));
             }
         }
     }
 
-    /* ---------- SAE timing (commit/confirm) ---------- */
-    if (s_mode & OFF_MODE_SAE_TIMING) {
-        if (type == 2 && subtype == 0x0B && sta) {
-            /* Auth frame: we measure time delta between commit/confirm. */
-            uint32_t now = (uint32_t)(ts_us / 1000);
-            if (sae_timing.commit_time_us == 0) {
-                sae_timing.commit_time_us = now;
-                memcpy(sae_timing.ap_bssid, bssid, 6);
-            } else {
-                sae_timing.confirm_time_us = now;
-                sae_timing.delta_us = now - sae_timing.commit_time_us;
-                ESP_LOGI(TAG, "SAE timing delta %" PRIu32 " ms", sae_timing.delta_us);
+    /* ---------- SAE Timing & Dragonfly (Authentication Frames) ---------- */
+    if ((s_mode & OFF_MODE_SAE_TIMING) || (s_mode & OFF_MODE_DRAGONFLY)) {
+        /* Management Frame (Type 0), Authentication (Subtype 11) */
+        if (type == 0 && subtype == 11 && len >= 30) {
+            uint16_t auth_alg = data[24] | (data[25] << 8);
+            if (auth_alg == 3) { /* SAE Auth Algorithm */
+                uint16_t auth_seq = data[26] | (data[27] << 8);
+                uint32_t now_ms = (uint32_t)(ts_us / 1000);
+                
+                if (s_mode & OFF_MODE_SAE_TIMING) {
+                    if (auth_seq == 1) { /* Commit */
+                        s_sae_timing.commit_time_us = now_ms;
+                        memcpy(s_sae_timing.ap_bssid, bssid, 6);
+                    } else if (auth_seq == 2 && s_sae_timing.commit_time_us > 0) { /* Confirm */
+                        s_sae_timing.confirm_time_us = now_ms;
+                        s_sae_timing.delta_us = now_ms - s_sae_timing.commit_time_us;
+                        ESP_LOGI(TAG, "SAE timing delta: %" PRIu32 " ms", s_sae_timing.delta_us);
+                        s_sae_timing.commit_time_us = 0; /* Reset for next */
+                    }
+                }
+                
+                if ((s_mode & OFF_MODE_DRAGONFLY) && !s_dragonfly.valid && auth_seq == 1) {
+                    memcpy(s_dragonfly.ap_bssid, bssid, 6);
+                    wifi_sniffer_get_ssid_for_bssid(bssid, (char*)s_dragonfly.ssid, sizeof(s_dragonfly.ssid));
+                    s_dragonfly.valid = true;
+                    ESP_LOGI(TAG, "Dragonfly SAE Commit captured");
+                }
             }
         }
     }
 
-    /* ---------- Dragonfly / SAE simulation ---------- */
-    if (s_mode & OFF_MODE_DRAGONFLY) {
-        if (type == 2 && subtype == 0x0B && !s_dragonfly.valid) {
-            memcpy(s_dragonfly.ap_bssid, bssid, 6);
-            wifi_sniffer_get_ssid_for_bssid(bssid, s_dragonfly.ssid, sizeof(s_dragonfly.ssid));
-            s_dragonfly.valid = true;
-            ESP_LOGI(TAG, "Dragonfly capture state initialized");
-        }
-    }
-
-    /* ---------- 802.11r FT handshake ---------- */
+    /* ---------- 802.11r FT Handshake (Reassociation Request) ---------- */
     if (s_mode & OFF_MODE_FT) {
-        if (type == 2 && subtype == 0x08) {
-            /* Reassociation request: capture FT-related fields. */
-            if (!s_ft.valid) {
-                memcpy(s_ft.ap_bssid, bssid, 6);
-                memcpy(s_ft.sta_mac, sta, 6);
-                s_ft.reassoc_time_us = (uint32_t)(ts_us / 1000);
-                s_ft.valid = true;
-                ESP_LOGI(TAG, "FT reassoc captured");
-            }
+        /* Management Frame (Type 0), Reassociation Request (Subtype 2) */
+        if (type == 0 && subtype == 2 && sta && !s_ft.valid) {
+            memcpy(s_ft.ap_bssid, bssid, 6);
+            memcpy(s_ft.sta_mac, sta, 6);
+            s_ft.reassoc_time_us = (uint32_t)(ts_us / 1000);
+            s_ft.valid = true;
+            ESP_LOGI(TAG, "FT Reassociation Request captured");
         }
     }
 
-    /* ---------- 802.11k neighbor report injection ---------- */
+    /* ---------- 802.11k Neighbor Report (Beacons/Probe Responses) ---------- */
     if (s_mode & OFF_MODE_11K) {
-        /* State machine: store last seen BSSID + channel for injection. */
-        s_11k.channel = channel;
-        memcpy(s_11k.neighbor_bssid, bssid, 6);
-        if (sta) {
-            memcpy(s_11k.target_bssid, sta, 6);
+        /* Management Frame (Type 0), Beacon (8) or Probe Response (5) */
+        if (type == 0 && (subtype == 8 || subtype == 5)) {
+            s_11k.channel = channel;
+            memcpy(s_11k.neighbor_bssid, bssid, 6);
+            if (sta) memcpy(s_11k.target_bssid, sta, 6);
         }
     }
 
-    /* ---------- 802.11v BTM ---------- */
+    /* ---------- 802.11v BTM (Action Frames) ---------- */
     if (s_mode & OFF_MODE_11V) {
-        if (type == 0 && subtype == 0x0D) {
-            /* Disassoc imminent frame from AP. */
-            memcpy(s_11v.ap_bssid, bssid, 6);
-            s_11v.disassoc_timer = data[25];
-            ESP_LOGI(TAG, "BTM disassoc imminent from "MACSTR" in %d seconds",
-                     MAC2STR(bssid), data[25]);
+        /* Management Frame (Type 0), Action (Subtype 13) */
+        if (type == 0 && subtype == 13 && len >= 26) {
+            uint8_t category = data[24];
+            if (category == 10) { /* WNM (Wireless Network Management) */
+                uint8_t action = data[25];
+                if (action == 7) { /* BSS Transition Management Request */
+                    memcpy(s_11v.ap_bssid, bssid, 6);
+                    /* Disassoc timer is typically at offset 28 in BTM Req */
+                    if (len >= 29) {
+                        s_11v.disassoc_timer = data[28]; 
+                    }
+                    ESP_LOGI(TAG, "BTM Request captured from " MACSTR, MAC2STR(bssid));
+                }
+            }
         }
     }
 
-    /* ---------- WPS PixieDust ---------- */
-    if (s_mode & OFF_MODE_WPS) {
-        if (type == 2 && subtype == 0x0B && !s_wps.valid) {
-            /* Auth frame may carry WPS IE. */
-            memcpy(s_wps.ap_bssid, bssid, 6);
-            if (sta) {
-                memcpy(s_wps.enrollee_mac, sta, 6);
+    /* ---------- WPS & Enterprise EAP (Data Frames) ---------- */
+    if ((s_mode & OFF_MODE_WPS) || (s_mode & OFF_MODE_EAP)) {
+        /* Data Frame (Type 2) */
+        if (type == 2) {
+            if ((s_mode & OFF_MODE_WPS) && !s_wps.valid) {
+                memcpy(s_wps.ap_bssid, bssid, 6);
+                if (sta) memcpy(s_wps.enrollee_mac, sta, 6);
+                size_t copy = len > sizeof(s_wps.m1) ? sizeof(s_wps.m1) : len;
+                memcpy(s_wps.m1, data, copy);
+                s_wps.m1_len = (uint16_t)copy;
+                s_wps.valid = true;
+                ESP_LOGI(TAG, "WPS Data Frame captured");
             }
-            size_t copy = len > sizeof(s_wps.m1) ? sizeof(s_wps.m1) : len;
-            memcpy(s_wps.m1, data, copy);
-            s_wps.m1_len = (uint16_t)copy;
-            s_wps.valid = true;
-            ESP_LOGI(TAG, "WPS M1 captured");
+            
+            if (s_mode & OFF_MODE_EAP) {
+                memcpy(s_eap.ap_bssid, bssid, 6);
+                if (sta) memcpy(s_eap.sta_mac, sta, 6);
+                size_t off = 24; /* Skip MAC header */
+                if (len > off) {
+                    size_t copy = len - off;
+                    if (copy > sizeof(s_eap.challenge)) copy = sizeof(s_eap.challenge);
+                    memcpy(s_eap.challenge, data + off, copy);
+                    s_eap.challenge_len = (uint8_t)copy;
+                }
+            }
         }
     }
 
-    /* ---------- Enterprise EAP ---------- */
-    if (s_mode & OFF_MODE_EAP) {
-        if (type == 2 && subtype == 0x08) {
-            /* Data frame with EAP payload. */
-            memcpy(s_eap.ap_bssid, bssid, 6);
-            if (sta) {
-                memcpy(s_eap.sta_mac, sta, 6);
-            }
-            size_t off = len > 26 ? 26 : len;
-            size_t copy = len - off;
-            if (copy > sizeof(s_eap.challenge)) {
-                copy = sizeof(s_eap.challenge);
-            }
-            memcpy(s_eap.challenge, data + off, copy);
-            s_eap.challenge_len = (uint8_t)copy;
-            ESP_LOGI(TAG, "Enterprise EAP capture %d bytes", s_eap.challenge_len);
-        }
-    }
-
+    xSemaphoreGive(s_lock);
     return ESP_OK;
 }
 
-/* ---------------------------------------------------------------------------
+/* -------------------------------------------------------------------------
  *  Getters
- * --------------------------------------------------------------------------- */
-esp_err_t offensive_get_pmkid(off_pmkid_t *out)
-{
-    if (!out) return ESP_ERR_INVALID_ARG;
-    memcpy(out, &s_pmkid, sizeof(s_pmkid));
-    return ESP_OK;
+ * ----------------------------------------------------------------------- */
+
+#define SAFE_GETTER(func_name, struct_type, state_var) \
+esp_err_t func_name(struct_type *out) { \
+    if (!out || s_lock == NULL) return ESP_ERR_INVALID_ARG; \
+    xSemaphoreTake(s_lock, portMAX_DELAY); \
+    memcpy(out, &state_var, sizeof(struct_type)); \
+    xSemaphoreGive(s_lock); \
+    return ESP_OK; \
 }
 
-esp_err_t offensive_get_sae_timing(off_sae_timing_t *out)
-{
-    if (!out) return ESP_ERR_INVALID_ARG;
-    memcpy(out, &sae_timing, sizeof(sae_timing));
-    return ESP_OK;
-}
+SAFE_GETTER(offensive_get_pmkid, off_pmkid_t, s_pmkid)
+SAFE_GETTER(offensive_get_sae_timing, off_sae_timing_t, s_sae_timing)
+SAFE_GETTER(offensive_get_dragonfly, off_dragonfly_t, s_dragonfly)
+SAFE_GETTER(offensive_get_ft, off_ft_t, s_ft)
+SAFE_GETTER(offensive_get_11k, off_11k_t, s_11k)
+SAFE_GETTER(offensive_get_11v, off_11v_t, s_11v)
+SAFE_GETTER(offensive_get_wps, off_wps_t, s_wps)
+SAFE_GETTER(offensive_get_eap, off_eap_t, s_eap)
 
-esp_err_t offensive_get_dragonfly(off_dragonfly_t *out)
-{
-    if (!out) return ESP_ERR_INVALID_ARG;
-    memcpy(out, &s_dragonfly, sizeof(s_dragonfly));
-    return ESP_OK;
-}
+/* -------------------------------------------------------------------------
+ *  JSON Report
+ * ----------------------------------------------------------------------- */
 
-esp_err_t offensive_get_ft(off_ft_t *out)
-{
-    if (!out) return ESP_ERR_INVALID_ARG;
-    memcpy(out, &s_ft, sizeof(s_ft));
-    return ESP_OK;
-}
-
-esp_err_t offensive_get_11k(off_11k_t *out)
-{
-    if (!out) return ESP_ERR_INVALID_ARG;
-    memcpy(out, &s_11k, sizeof(s_11k));
-    return ESP_OK;
-}
-
-esp_err_t offensive_get_11v(off_11v_t *out)
-{
-    if (!out) return ESP_ERR_INVALID_ARG;
-    memcpy(out, &s_11v, sizeof(s_11v));
-    return ESP_OK;
-}
-
-esp_err_t offensive_get_wps(off_wps_t *out)
-{
-    if (!out) return ESP_ERR_INVALID_ARG;
-    memcpy(out, &s_wps, sizeof(s_wps));
-    return ESP_OK;
-}
-
-esp_err_t offensive_get_eap(off_eap_t *out)
-{
-    if (!out) return ESP_ERR_INVALID_ARG;
-    memcpy(out, &s_eap, sizeof(s_eap));
-    return ESP_OK;
-}
-
-/* ---------------------------------------------------------------------------
- *  JSON report
- * --------------------------------------------------------------------------- */
 esp_err_t offensive_json(char *buf, size_t bufsz)
 {
-    if (!buf || bufsz == 0) return ESP_ERR_INVALID_ARG;
-    int n = snprintf(buf, bufsz,
-        "{"
-        "\"mode\":\"0x%08" PRIx32 "\",", s_mode);
+    if (!buf || bufsz == 0 || s_lock == NULL) return ESP_ERR_INVALID_ARG;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    
+    int n = 0;
+    json_append(buf, bufsz, &n, "{\"mode\":\"0x%08" PRIx32 "\"", s_mode);
 
     if (s_pmkid.valid) {
-        n += snprintf(buf + n, bufsz - n,
-            "\"pmkid\":{\"ap_bssid\":\""MACSTR"\",\"pmkid\":\"", MAC2STR(s_pmkid.ap_bssid));
+        json_append(buf, bufsz, &n, ",\"pmkid\":{\"ap_bssid\":\"" MACSTR "\",\"pmkid\":\"", MAC2STR(s_pmkid.ap_bssid));
         for (int i = 0; i < 16 && n < (int)bufsz - 3; i++) {
-            n += snprintf(buf + n, bufsz - n, "%02x", s_pmkid.pmkid[i]);
+            json_append(buf, bufsz, &n, "%02x", s_pmkid.pmkid[i]);
         }
-        n += snprintf(buf + n, bufsz - n, "\"},");
+        json_append(buf, bufsz, &n, "\"}");
     }
 
-    if (sae_timing.commit_time_us > 0) {
-        n += snprintf(buf + n, bufsz - n,
-            "\"sae_timing\":{\"delta_ms\":%" PRIu32 "},", sae_timing.delta_us);
+    if (s_sae_timing.commit_time_us > 0 || s_sae_timing.delta_us > 0) {
+        json_append(buf, bufsz, &n, ",\"sae_timing\":{\"delta_ms\":%" PRIu32 "}", s_sae_timing.delta_us);
     }
 
     if (s_ft.valid) {
-        n += snprintf(buf + n, bufsz - n,
-            "\"ft\":{\"ap_bssid\":\""MACSTR"\",\"sta_mac\":\""MACSTR"\"},",
-            MAC2STR(s_ft.ap_bssid), MAC2STR(s_ft.sta_mac));
+        json_append(buf, bufsz, &n, ",\"ft\":{\"ap_bssid\":\"" MACSTR "\",\"sta_mac\":\"" MACSTR "\"}",
+                    MAC2STR(s_ft.ap_bssid), MAC2STR(s_ft.sta_mac));
     }
 
     if (s_wps.valid) {
-        n += snprintf(buf + n, bufsz - n,
-            "\"wps\":{\"ap_bssid\":\""MACSTR"\",\"m1_len\":%d},",
-            MAC2STR(s_wps.ap_bssid), s_wps.m1_len);
+        json_append(buf, bufsz, &n, ",\"wps\":{\"ap_bssid\":\"" MACSTR "\",\"m1_len\":%d}",
+                    MAC2STR(s_wps.ap_bssid), s_wps.m1_len);
     }
 
     if (s_eap.challenge_len > 0) {
-        n += snprintf(buf + n, bufsz - n,
-            "\"eap\":{\"ap_bssid\":\""MACSTR"\",\"bytes\":%d},",
-            MAC2STR(s_eap.ap_bssid), s_eap.challenge_len);
+        json_append(buf, bufsz, &n, ",\"eap\":{\"ap_bssid\":\"" MACSTR "\",\"bytes\":%d}",
+                    MAC2STR(s_eap.ap_bssid), s_eap.challenge_len);
     }
 
-    /* Trim trailing comma */
-    if (n > 1 && buf[n - 1] == ',') {
-        buf[n - 1] = '}';
-        n--;
-    } else {
-        buf[n++] = '}';
-    }
-    buf[n] = '\0';
-    return ESP_OK;
+    json_append(buf, bufsz, &n, "}");
+    
+    xSemaphoreGive(s_lock);
+    
+    return (n >= (int)bufsz) ? ESP_ERR_NO_MEM : ESP_OK;
 }

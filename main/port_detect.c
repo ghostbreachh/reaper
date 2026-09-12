@@ -1,31 +1,32 @@
 /*
  * ============================================================================
  *  port_detect.c  —  Boot-time USB transport detection for ESP32-S3
- *
- *  Detects which USB function is active at boot:
- *    • USB-Serial-JTAG  → UART0 / COM port console
- *    • USB-OTG CDC-ACM  → phone control / JSON-RPC
- *    • Both / neither    → fallback to UART0
- *
- *  ESP32-S3 constraint: USB-Serial-JTAG and USB-OTG share one PHY.
- *  Only one can be active at a time on silicon. TinyUSB CDC must be
- *  disabled when USB-Serial-JTAG is in use, and vice-versa.
- *
- *  Detection strategy:
- *    1. Read USB-Serial-JTAG controller enable state
- *    2. Check TinyUSB CDC attach state if component is enabled
- *    3. If both appear present, prefer UART0 and report ambiguity
- *    4. If neither, fall back to UART0 and report WARNING
  * ============================================================================
  */
 
 #include "port_detect.h"
+
+#include <string.h>
+#include <stdio.h>
+
 #include "esp_log.h"
 #include "esp_system.h"
+
 #include "soc/usb_serial_jtag_reg.h"
 #include "driver/usb_serial_jtag.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+/* Fallback color macros if not defined in common_types.h */
+#ifndef GRY
+#define GRY "\033[90m"
+#define GRN "\033[32m"
+#define YLW "\033[33m"
+#define RED "\033[31m"
+#define WHT "\033[37m"
+#define R0  "\033[0m"
+#endif
 
 static const char *TAG = "port_detect";
 
@@ -34,26 +35,42 @@ port_detect_result_t g_boot_port;
 
 /* -------------------------------------------------------------------------
  *  Low-level: probe USB-Serial-JTAG controller enable state
- *
- *  USB_SERIAL_JTAG_CONF0 is mapped by soc/usb_serial_jtag_reg.h.
- *  Bit USB_SERIAL_JTAG_USB_PAD_ENABLE indicates the pad is active.
  * ----------------------------------------------------------------------- */
 static bool usb_serial_jtag_is_enabled(void)
 {
-    uint32_t conf = READ_PERI_REG(USB_SERIAL_JTAG_CONF0_REG);
-    return (conf & USB_SERIAL_JTAG_USB_PAD_ENABLE_M) != 0;
+    /* 
+     * Primary check: Kconfig. If the firmware was compiled for JTAG console,
+     * it is the intended transport.
+     */
+#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) || defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED)
+    return true;
+#else
+    /* Fallback: Direct register check */
+    #ifdef USB_SERIAL_JTAG_CONF0_REG
+        uint32_t conf = READ_PERI_REG(USB_SERIAL_JTAG_CONF0_REG);
+        #ifdef USB_SERIAL_JTAG_USB_PAD_ENABLE_M
+            return (conf & USB_SERIAL_JTAG_USB_PAD_ENABLE_M) != 0;
+        #else
+            return (conf & BIT(17)) != 0; /* USB_PAD_ENABLE is typically bit 17 */
+        #endif
+    #else
+        return false;
+    #endif
+#endif
 }
 
 /* -------------------------------------------------------------------------
- *  Low-level: probe TinyUSB CDC-ACM attach state
+ *  Low-level: probe TinyUSB CDC-ACM enable state
  *
- *  Best-effort read: TinyUSB only exposes runtime state through its tud_* API
- *  when the component is enabled. When disabled, treat CDC as absent.
+ *  NOTE: We DO NOT use tud_cdc_connected() here. That function checks if 
+ *  the host has enumerated and opened the port, which takes hundreds of 
+ *  milliseconds. At boot time, it will almost always return false.
+ *  Instead, we check Kconfig to see if the firmware was BUILT for CDC.
  * ----------------------------------------------------------------------- */
-static bool cdc_acm_is_present(void)
+static bool cdc_acm_is_enabled(void)
 {
-#ifdef CONFIG_TINYUSB_CDC_ENABLED
-    return tud_cdc_connected();
+#if defined(CONFIG_TINYUSB_CDC_ENABLED) || defined(CONFIG_ESP_CONSOLE_USB_CDC)
+    return true;
 #else
     return false;
 #endif
@@ -71,7 +88,7 @@ esp_err_t boot_port_detect(port_detect_result_t *out_result)
     memset(out_result, 0, sizeof(*out_result));
 
     bool jtag = usb_serial_jtag_is_enabled();
-    bool cdc  = cdc_acm_is_present();
+    bool cdc  = cdc_acm_is_enabled();
 
     out_result->usb_serial_jtag_present = jtag;
     out_result->cdc_acm_present         = cdc;
@@ -84,6 +101,11 @@ esp_err_t boot_port_detect(port_detect_result_t *out_result)
         out_result->active = PORT_TRANSPORT_CDC;
         out_result->reason = PORT_REASON_CDC_ONLY;
     } else if (jtag && cdc) {
+        /* 
+         * ESP32-S3 hardware constraint: USB-Serial-JTAG and USB-OTG share 
+         * the same PHY. They cannot be active simultaneously. If Kconfig 
+         * somehow enabled both, JTAG usually wins at the hardware level.
+         */
         out_result->active = PORT_TRANSPORT_UART0;
         out_result->reason = PORT_REASON_BOTH;
     } else {
@@ -140,7 +162,7 @@ void port_print_banner(const port_detect_result_t *res)
 
     if (res->both_active) {
         printf("  │\n");
-        printf("  │  " RED "!" R0 "  Both USB functions reported active. "
+        printf("  │  " RED "!" R0 "  Both USB functions reported active in Kconfig. "
                "PHY conflict possible on silicon.\n");
         printf("  │      Only one can be used at a time. Defaulting to COM.\n");
     }

@@ -1,175 +1,471 @@
 #include "ai_rogue_detector.h"
 #include "common_types.h"
+#include "wifi_sniffer.h"
+
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
+#include <stdarg.h>
+#include <inttypes.h>
+
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_err.h"
+#include "esp_timer.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
-/* ============================================================================
- *  ROGUE AP DETECTOR (evil twin clustering)
- * ============================================================================
- *
- *  Branch A — Full evil-twin ML model
- *    Decision: REJECTED. Rogue detection is rule-based clustering; ML adds
- *              little beyond what OUI/channel/cipher comparison already gives.
- *  Branch B — SSID group + BSSID/cipher/channel heuristic clustering
- *    Decision: ACCEPTED. Groups APs by SSID, flags mismatched OUI, channel,
- *              cipher, or channel-hop anomalies.
- *  Branch C — External IDS/rules engine
- *    Decision: REJECTED. Keep it inline; no external dependency.
- */
+#include "freertos/semphr.h"
 
 static const char *TAG = "ai_rogue";
 
-static ai_rogue_alert_t g_alerts[16];
-static uint8_t          g_alert_count = 0;
-static bool             g_init_done   = false;
-static uint64_t         g_last_scan_us = 0;
-static const uint64_t    g_scan_interval_us = 1000000ULL; /* 1s throttle */
+#define AI_ROGUE_SCAN_INTERVAL_US 1000000ULL /* 1 second */
 
-esp_err_t ai_rogue_detector_init(void)
+typedef enum {
+    ROGUE_SEC_OPEN = 0,
+    ROGUE_SEC_PROTECTED = 1,
+    ROGUE_SEC_WPA3 = 2
+} rogue_sec_profile_t;
+
+typedef struct {
+    char ssid[33];
+    uint8_t bssid[6];
+    uint8_t oui[3];
+    uint8_t channel;
+    rogue_sec_profile_t sec;
+} rogue_ap_entry_t;
+
+static ai_rogue_alert_t g_alerts[AI_ROGUE_MAX_ALERTS];
+static uint8_t g_alert_count = 0;
+
+static rogue_ap_entry_t g_entries[MAX_DISCOVERED_APS];
+
+static bool g_init_done = false;
+static int64_t g_last_scan_us = 0;
+
+static SemaphoreHandle_t g_lock = NULL;
+
+/* -------------------------------------------------------------------------
+ *  Helpers
+ * ----------------------------------------------------------------------- */
+
+static bool mac_is_locally_administered(const uint8_t *mac)
 {
-    if (g_init_done) return ESP_OK;
-
-    memset(g_alerts, 0, sizeof(g_alerts));
-    g_alert_count = 0;
-    g_init_done = true;
-    ESP_LOGI(TAG, "rogue detector init");
-    return ESP_OK;
-}
-
-static void add_alert(const char *ssid, const uint8_t *bssid, const uint8_t *oui,
-                      uint8_t channel, uint8_t flags, const char *reason)
-{
-    if (g_alert_count >= 16) return;
-
-    ai_rogue_alert_t *a = &g_alerts[g_alert_count++];
-    snprintf(a->ssid, sizeof(a->ssid), "%s", ssid);
-    memcpy(a->bssid, bssid, 6);
-    if (oui) memcpy(a->oui, oui, 3);
-    a->channel = channel;
-    a->flags = flags;
-    snprintf(a->reason, sizeof(a->reason), "%s", reason);
-}
-
-esp_err_t ai_rogue_detector_scan(void)
-{
-    if (!g_init_done) return ESP_ERR_INVALID_STATE;
-
-    uint64_t now = esp_timer_get_time();
-    if (now - g_last_scan_us < g_scan_interval_us) return ESP_OK;
-    g_last_scan_us = now;
-
-    g_alert_count = 0;
-    memset(g_alerts, 0, sizeof(g_alerts));
-
-    /* Group APs by SSID index for clustering */
-    typedef struct { uint8_t idx; uint8_t bssid[6]; uint8_t oui[3]; uint8_t channel; bool open; } grp_ap_t;
-    static grp_ap_t groups[8][16];
-    static uint8_t  grp_count[8];
-    memset(groups, 0, sizeof(groups));
-    memset(grp_count, 0, sizeof(grp_count));
-
-    extern ap_info_t *g_ap_list;
-    extern uint32_t    g_ap_count;
-
-    for (uint32_t i = 0; i < g_ap_count && i < 64; i++) {
-        const ap_info_t *ap = &g_ap_list[i];
-        if (ap->ssid[0] == '\0') continue;
-
-        /* Hash SSID to group index */
-        uint8_t gidx = 0;
-        for (int j = 0; ap->ssid[j] != '\0' && j < 32; j++) gidx += (uint8_t)ap->ssid[j];
-        gidx %= 8;
-        if (grp_count[gidx] >= 16) continue;
-
-        grp_ap_t *g = &groups[gidx][grp_count[gidx]++];
-        g->idx = (uint8_t)i;
-        memcpy(g->bssid, ap->bssid, 6);
-        memcpy(g->oui, ap->bssid, 3);
-        g->channel = ap->channel;
-        g->open = !ap->pmf_capable && !ap->wpa3_sae && ap->akm_count == 0;
+    if (mac == NULL) {
+        return false;
     }
 
-    /* Detect anomalies within groups */
-    for (uint8_t g = 0; g < 8; g++) {
-        if (grp_count[g] < 2) continue;
+    return (mac[0] & 0x02u) != 0;
+}
 
-        for (uint8_t a = 0; a < grp_count[g]; a++) {
-            for (uint8_t b = a + 1; b < grp_count[g]; b++) {
-                const grp_ap_t *x = &groups[g][a];
-                const grp_ap_t *y = &groups[g][b];
-                uint8_t flags = 0;
-                char reason[64] = "";
+static rogue_sec_profile_t get_security_profile(const ap_info_t *ap)
+{
+    if (ap->wpa3_sae) {
+        return ROGUE_SEC_WPA3;
+    }
 
-                if (memcmp(x->oui, y->oui, 3) != 0) {
-                    flags |= AI_ROGUE_FLAG_DIFF_OUI;
-                    snprintf(reason, sizeof(reason), "diff OUI");
-                }
-                if (x->channel != y->channel) {
-                    flags |= AI_ROGUE_FLAG_DIFF_CHAN;
-                    if (reason[0]) snprintf(reason + strlen(reason), sizeof(reason) - strlen(reason), "; diff chan");
-                }
-                if (x->open != y->open) {
-                    flags |= AI_ROGUE_FLAG_DIFF_CIPHER;
-                    if (reason[0]) snprintf(reason + strlen(reason), sizeof(reason) - strlen(reason), "; mixed cipher");
-                }
+    if (ap->pmf_capable || ap->rsn_version != 0 || ap->akm_count != 0) {
+        return ROGUE_SEC_PROTECTED;
+    }
 
-                if (flags != 0) {
-                    add_alert(g_ap_list[x->idx].ssid, x->bssid, x->oui, x->channel, flags, reason);
-                    break; /* one alert per pair */
-                }
+    return ROGUE_SEC_OPEN;
+}
+
+static void reason_append(char *reason, size_t reason_sz, const char *text)
+{
+    if (reason == NULL || reason_sz == 0 || text == NULL) {
+        return;
+    }
+
+    size_t len = strlen(reason);
+
+    if (len > 0) {
+        snprintf(reason + len, reason_sz - len, "; %s", text);
+    } else {
+        snprintf(reason, reason_sz, "%s", text);
+    }
+}
+
+static void escape_json_string(char *dst, size_t dst_sz, const char *src)
+{
+    if (dst == NULL || dst_sz == 0) {
+        return;
+    }
+
+    size_t j = 0;
+
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+
+    for (size_t i = 0; src[i] != '\0' && j + 1 < dst_sz; i++) {
+        unsigned char c = (unsigned char)src[i];
+
+        if (c == '"' || c == '\\') {
+            if (j + 2 >= dst_sz) {
+                break;
             }
+
+            dst[j++] = '\\';
+            dst[j++] = (char)c;
+        } else if (isprint(c)) {
+            dst[j++] = (char)c;
+        } else {
+            dst[j++] = '_';
         }
     }
 
-    ESP_LOGI(TAG, "rogue scan: %d alerts", g_alert_count);
-    return ESP_OK;
+    dst[j] = '\0';
 }
 
-uint8_t ai_rogue_detector_alert_count(void)
+static void add_alert_locked(const rogue_ap_entry_t *entry,
+                             uint8_t flags,
+                             uint8_t peer_count,
+                             const char *reason)
 {
-    return g_alert_count;
-}
-
-esp_err_t ai_rogue_detector_get_alert(uint8_t idx, ai_rogue_alert_t *out)
-{
-    if (out == NULL || idx >= g_alert_count) return ESP_ERR_INVALID_ARG;
-    memcpy(out, &g_alerts[idx], sizeof(*out));
-    return ESP_OK;
-}
-
-esp_err_t ai_rogue_detector_json(char *buf, size_t bufsz)
-{
-    int w = snprintf(buf, bufsz, "[");
-    if (w < 0 || (size_t)w >= bufsz) return ESP_ERR_NO_MEM;
-
-    for (uint8_t i = 0; i < g_alert_count && (size_t)w < bufsz; i++) {
-        int n = snprintf(buf + w, bufsz - w,
-            "%s{\"ssid\":\"%s\",\"bssid\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
-            "\"oui\":\"%02X:%02X:%02X\",\"channel\":%d,\"flags\":%d,\"reason\":\"%s\"}",
-            i == 0 ? "" : ",",
-            g_alerts[i].ssid,
-            g_alerts[i].bssid[0], g_alerts[i].bssid[1], g_alerts[i].bssid[2],
-            g_alerts[i].bssid[3], g_alerts[i].bssid[4], g_alerts[i].bssid[5],
-            g_alerts[i].oui[0], g_alerts[i].oui[1], g_alerts[i].oui[2],
-            g_alerts[i].channel, g_alerts[i].flags, g_alerts[i].reason);
-        if (n < 0 || (size_t)n >= bufsz - w) break;
-        w += n;
+    if (g_alert_count >= AI_ROGUE_MAX_ALERTS) {
+        return;
     }
 
-    if ((size_t)w + 1 >= bufsz) return ESP_ERR_NO_MEM;
-    buf[w++] = ']';
-    buf[w] = '\0';
+    ai_rogue_alert_t *a = &g_alerts[g_alert_count];
+
+    memset(a, 0, sizeof(*a));
+
+    snprintf(a->ssid, sizeof(a->ssid), "%s", entry->ssid);
+    memcpy(a->bssid, entry->bssid, 6);
+    memcpy(a->oui, entry->oui, 3);
+
+    a->channel = entry->channel;
+    a->flags = flags;
+    a->peer_count = peer_count;
+
+    snprintf(a->reason, sizeof(a->reason), "%s", reason != NULL ? reason : "");
+
+    g_alert_count++;
+}
+
+/* -------------------------------------------------------------------------
+ *  Lifecycle
+ * ----------------------------------------------------------------------- */
+
+esp_err_t ai_rogue_detector_init(void)
+{
+    if (g_init_done) {
+        return ESP_OK;
+    }
+
+    if (g_lock == NULL) {
+        g_lock = xSemaphoreCreateMutex();
+        if (g_lock == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+
+    memset(g_alerts, 0, sizeof(g_alerts));
+    memset(g_entries, 0, sizeof(g_entries));
+
+    g_alert_count = 0;
+    g_last_scan_us = 0;
+    g_init_done = true;
+
+    xSemaphoreGive(g_lock);
+
+    ESP_LOGI(TAG, "Rogue AP detector initialized");
     return ESP_OK;
 }
 
 void ai_rogue_detector_deinit(void)
 {
+    if (g_lock == NULL) {
+        return;
+    }
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+
+    memset(g_alerts, 0, sizeof(g_alerts));
+    memset(g_entries, 0, sizeof(g_entries));
+
     g_alert_count = 0;
+    g_last_scan_us = 0;
     g_init_done = false;
-    ESP_LOGI(TAG, "rogue detector deinit");
+
+    xSemaphoreGive(g_lock);
+
+    ESP_LOGI(TAG, "Rogue AP detector deinitialized");
+}
+
+/* -------------------------------------------------------------------------
+ *  Scan
+ * ----------------------------------------------------------------------- */
+
+esp_err_t ai_rogue_detector_scan(void)
+{
+    if (g_lock == NULL || !g_init_done) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    int64_t now = esp_timer_get_time();
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+
+    if ((now - g_last_scan_us) < AI_ROGUE_SCAN_INTERVAL_US) {
+        xSemaphoreGive(g_lock);
+        return ESP_OK;
+    }
+
+    g_last_scan_us = now;
+
+    g_alert_count = 0;
+    memset(g_alerts, 0, sizeof(g_alerts));
+    memset(g_entries, 0, sizeof(g_entries));
+
+    xSemaphoreGive(g_lock);
+
+    uint16_t ap_count = wifi_sniffer_get_ap_count();
+
+    if (ap_count > MAX_DISCOVERED_APS) {
+        ap_count = MAX_DISCOVERED_APS;
+    }
+
+    uint16_t entry_count = 0;
+
+    for (uint16_t i = 0; i < ap_count; i++) {
+        ap_info_t ap;
+
+        if (wifi_sniffer_get_ap(i, &ap) != ESP_OK) {
+            continue;
+        }
+
+        if (ap.ssid[0] == '\0') {
+            continue;
+        }
+
+        if (strcmp(ap.ssid, "<HIDDEN>") == 0) {
+            continue;
+        }
+
+        xSemaphoreTake(g_lock, portMAX_DELAY);
+
+        rogue_ap_entry_t *e = &g_entries[entry_count];
+
+        snprintf(e->ssid, sizeof(e->ssid), "%s", ap.ssid);
+        memcpy(e->bssid, ap.bssid, 6);
+        memcpy(e->oui, ap.bssid, 3);
+        e->channel = ap.channel;
+        e->sec = get_security_profile(&ap);
+
+        entry_count++;
+
+        xSemaphoreGive(g_lock);
+
+        if (entry_count >= MAX_DISCOVERED_APS) {
+            break;
+        }
+    }
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+
+    for (uint16_t i = 0; i < entry_count; i++) {
+        const rogue_ap_entry_t *a = &g_entries[i];
+
+        uint8_t flags = 0;
+        uint8_t peer_count = 0;
+        char reason[64] = "";
+
+        for (uint16_t j = 0; j < entry_count; j++) {
+            if (i == j) {
+                continue;
+            }
+
+            const rogue_ap_entry_t *b = &g_entries[j];
+
+            if (strcmp(a->ssid, b->ssid) != 0) {
+                continue;
+            }
+
+            peer_count++;
+
+            if (memcmp(a->oui, b->oui, 3) != 0) {
+                flags |= AI_ROGUE_FLAG_DIFF_OUI;
+                reason_append(reason, sizeof(reason), "diff OUI");
+            }
+
+            if (a->channel != b->channel) {
+                flags |= AI_ROGUE_FLAG_DIFF_CHAN;
+                reason_append(reason, sizeof(reason), "diff channel");
+            }
+
+            if (a->sec != b->sec) {
+                flags |= AI_ROGUE_FLAG_DIFF_CIPHER;
+                reason_append(reason, sizeof(reason), "mixed security");
+            }
+        }
+
+        if (peer_count > 0 && mac_is_locally_administered(a->bssid)) {
+            flags |= AI_ROGUE_FLAG_MAC_ANOMALY;
+            reason_append(reason, sizeof(reason), "local MAC");
+        }
+
+        if (flags != 0) {
+            add_alert_locked(a, flags, peer_count, reason);
+        }
+    }
+
+    uint8_t final_count = g_alert_count;
+
+    xSemaphoreGive(g_lock);
+
+    ESP_LOGI(TAG, "Rogue scan complete: %u alerts", final_count);
+    return ESP_OK;
+}
+
+/* -------------------------------------------------------------------------
+ *  Alert access
+ * ----------------------------------------------------------------------- */
+
+uint8_t ai_rogue_detector_alert_count(void)
+{
+    if (g_lock == NULL || !g_init_done) {
+        return 0;
+    }
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    uint8_t count = g_alert_count;
+    xSemaphoreGive(g_lock);
+
+    return count;
+}
+
+esp_err_t ai_rogue_detector_get_alert(uint8_t idx, ai_rogue_alert_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (g_lock == NULL || !g_init_done) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+
+    if (idx >= g_alert_count) {
+        xSemaphoreGive(g_lock);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *out = g_alerts[idx];
+
+    xSemaphoreGive(g_lock);
+
+    return ESP_OK;
+}
+
+/* -------------------------------------------------------------------------
+ *  JSON export
+ * ----------------------------------------------------------------------- */
+
+static bool json_append(char *buf, size_t bufsz, size_t *off, const char *fmt, ...)
+{
+    if (buf == NULL || bufsz == 0 || off == NULL || *off >= bufsz) {
+        return false;
+    }
+
+    va_list args;
+    va_start(args, fmt);
+
+    int n = vsnprintf(buf + *off, bufsz - *off, fmt, args);
+
+    va_end(args);
+
+    if (n < 0) {
+        return false;
+    }
+
+    if ((size_t)n >= bufsz - *off) {
+        *off = bufsz - 1;
+        return false;
+    }
+
+    *off += (size_t)n;
+    return true;
+}
+
+esp_err_t ai_rogue_detector_json(char *buf, size_t bufsz)
+{
+    if (buf == NULL || bufsz == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (g_lock == NULL || !g_init_done) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ai_rogue_alert_t snapshot[AI_ROGUE_MAX_ALERTS];
+    uint8_t count = 0;
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+
+    count = g_alert_count;
+
+    if (count > AI_ROGUE_MAX_ALERTS) {
+        count = AI_ROGUE_MAX_ALERTS;
+    }
+
+    memcpy(snapshot, g_alerts, sizeof(ai_rogue_alert_t) * count);
+
+    xSemaphoreGive(g_lock);
+
+    size_t off = 0;
+
+    if (!json_append(buf, bufsz, &off, "[")) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        char ssid_json[72];
+        char reason_json[136];
+
+        escape_json_string(ssid_json, sizeof(ssid_json), snapshot[i].ssid);
+        escape_json_string(reason_json, sizeof(reason_json), snapshot[i].reason);
+
+        if (i > 0) {
+            if (!json_append(buf, bufsz, &off, ",")) {
+                return ESP_ERR_INVALID_SIZE;
+            }
+        }
+
+        if (!json_append(buf, bufsz, &off,
+                         "{\"ssid\":\"%s\","
+                         "\"bssid\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+                         "\"oui\":\"%02X:%02X:%02X\","
+                         "\"channel\":%u,"
+                         "\"flags\":%u,"
+                         "\"peer_count\":%u,"
+                         "\"reason\":\"%s\"}",
+                         ssid_json,
+                         snapshot[i].bssid[0],
+                         snapshot[i].bssid[1],
+                         snapshot[i].bssid[2],
+                         snapshot[i].bssid[3],
+                         snapshot[i].bssid[4],
+                         snapshot[i].bssid[5],
+                         snapshot[i].oui[0],
+                         snapshot[i].oui[1],
+                         snapshot[i].oui[2],
+                         (unsigned)snapshot[i].channel,
+                         (unsigned)snapshot[i].flags,
+                         (unsigned)snapshot[i].peer_count,
+                         reason_json)) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+    }
+
+    if (!json_append(buf, bufsz, &off, "]")) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
 }

@@ -3,11 +3,16 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+
 #include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Default model inference divider. */
+#define AI_FINGERPRINT_DEFAULT_INFER_EVERY 4
 
 /* Device type labels. */
 typedef enum {
@@ -38,35 +43,50 @@ typedef struct {
 esp_err_t ai_fingerprint_init(void);
 
 /**
+ * @brief Deinit fingerprinting.
+ */
+void ai_fingerprint_deinit(void);
+
+/**
  * @brief Set model name for device-type classifier.
  */
 esp_err_t ai_fingerprint_set_model(const char *model_name);
+
+/**
+ * @brief Set how often model inference runs.
+ *
+ * every_n = 1 -> every classification
+ * every_n = 4 -> every 4 classifications
+ */
+esp_err_t ai_fingerprint_set_infer_every(uint32_t every_n);
 
 /**
  * @brief Classify device from probe request / beacon IE.
  *
  * @param ie_data   Pointer to tagged parameters (after fixed params)
  * @param ie_len    Length of IE blob
- * @param subtype   0=beacon/probe_resp, 4=probe_req, etc.
+ * @param subtype   Standard 802.11 management subtype
+ * @param oui_mac   MAC address used for OUI extraction
  * @param out       Output result
  */
-esp_err_t ai_fingerprint_classify(const uint8_t *ie_data, size_t ie_len,
-                                  uint8_t subtype, const uint8_t *oui_mac,
+esp_err_t ai_fingerprint_classify(const uint8_t *ie_data,
+                                  size_t ie_len,
+                                  uint8_t subtype,
+                                  const uint8_t *oui_mac,
                                   ai_fp_result_t *out);
 
 /**
- * @brief Convert class enum to human-readable string. */
+ * @brief Convert class enum to human-readable string.
+ */
 const char *ai_fingerprint_class_name(ai_fp_class_t cls);
 
 /**
- * @brief Return fingerprint stats as JSON. */
+ * @brief Return fingerprint stats as JSON.
+ */
 esp_err_t ai_fingerprint_json(char *buf, size_t bufsz);
-
-/**
- * @brief Deinit fingerprinting. */
-void ai_fingerprint_deinit(void);
 
 #ifdef __cplusplus
 }
 #endif
+
 #endif /* AI_FINGERPRINT_H */

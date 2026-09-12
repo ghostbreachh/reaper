@@ -1,46 +1,25 @@
 /*
  * ============================================================================
  *  structured_log.c  —  Ring-buffer structured logging + JSON export
- *
- *  DECISION BLOCK — ToT Branch Selection
- *  -------------------------------------
- *  Requirement: replace scattered ESP_LOG/printf calls with structured
- *  in-memory logging, persistent ring buffer, and JSON export.
- *
- *  Branch A — esp_log to UART + host-side grep
- *    Pros: trivial, uses existing ESP-IDF logging.
- *    Cons: no in-memory history, no structured export, lost after reboot.
- *    Decision: REJECTED. Fails persistence/export requirements.
- *
- *  Branch B — FatFS log files with rotating handles
- *    Pros: persistent, human-readable.
- *    Cons: heavy wear on flash, no atomicity, no ring semantics,
- *          expensive open/close per message.
- *    Decision: REJECTED. Too slow and flash-hostile.
- *
- *  Branch C — Lock-free ring buffer in PSRAM + cJSON export
- *    Pros: O(1) write, no flash wear during operation, export on demand,
- *          structured fields (timestamp, tag, level, message).
- *    Cons: consumes RAM, requires caller-side adoption.
- *    Decision: ACCEPTED. Best performance and extensibility.
- *
- *  Chosen implementation:
- *    1. Fixed-size ring buffer of log entries in PSRAM.
- *    2. Lock-free single-producer writes via atomic sequence counter.
- *    3. JSON export via cJSON to SPIFFS or caller path.
  * ============================================================================
  */
 
 #include "structured_log.h"
+
+#include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdatomic.h>
+
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
+
 #include "freertos/FreeRTOS.h"
-#include "freertos/atomic.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
 #include "cJSON.h"
-#include "string.h"
-#include "stdio.h"
-#include <stdatomic.h>
 
 static const char *TAG = "slog";
 
@@ -48,17 +27,19 @@ static const char *TAG = "slog";
 #define LOG_MSG_MAX  160
 
 typedef struct {
-    uint64_t timestamp_us;
-    char      tag[24];
+    uint64_t    timestamp_us;
+    char        tag[24];
     log_level_t level;
-    char      message[LOG_MSG_MAX];
+    char        message[LOG_MSG_MAX];
 } log_entry_t;
 
 static log_entry_t *g_ring = NULL;
-static atomic_uint_fast32_t g_head = ATOMIC_VAR_INIT(0);
+static uint32_t g_head = 0;
 static atomic_bool g_initialized = ATOMIC_VAR_INIT(false);
 
-static atomic_bool g_filter_set = ATOMIC_VAR_INIT(false);
+static SemaphoreHandle_t g_lock = NULL;
+
+static bool g_filter_set = false;
 static char g_filter_tag[48] = {0};
 static log_level_t g_filter_min = LOG_LEVEL_VERBOSE;
 
@@ -67,11 +48,13 @@ static inline uint32_t ring_index(uint32_t seq)
     return seq % LOG_CAPACITY;
 }
 
-static inline bool matches_filter(const char *tag, log_level_t level)
+/* Must be called while holding g_lock */
+static inline bool matches_filter_locked(const char *tag, log_level_t level)
 {
-    if (!atomic_load(&g_filter_set)) return true;
+    if (!g_filter_set) return true;
     if (level < g_filter_min) return false;
     if (g_filter_tag[0] == '\0') return true;
+    if (tag == NULL) return false;
     return strstr(tag, g_filter_tag) != NULL;
 }
 
@@ -79,14 +62,25 @@ esp_err_t structured_log_init(void)
 {
     if (atomic_load(&g_initialized)) return ESP_OK;
 
-    g_ring = heap_caps_malloc(LOG_CAPACITY * sizeof(log_entry_t), MALLOC_CAP_SPIRAM);
-    if (!g_ring) {
-        ESP_LOGE(TAG, "PSRAM allocation failed for log ring");
-        return ESP_ERR_NO_MEM;
+    if (g_lock == NULL) {
+        g_lock = xSemaphoreCreateMutex();
+        if (g_lock == NULL) return ESP_ERR_NO_MEM;
+    }
+
+    if (g_ring == NULL) {
+        g_ring = heap_caps_malloc(LOG_CAPACITY * sizeof(log_entry_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!g_ring) {
+            ESP_LOGE(TAG, "PSRAM allocation failed for log ring");
+            return ESP_ERR_NO_MEM;
+        }
     }
 
     memset(g_ring, 0, LOG_CAPACITY * sizeof(log_entry_t));
-    atomic_store(&g_head, 0);
+    g_head = 0;
+    g_filter_set = false;
+    g_filter_tag[0] = '\0';
+    g_filter_min = LOG_LEVEL_VERBOSE;
+    
     atomic_store(&g_initialized, true);
 
     ESP_LOGI(TAG, "Structured log ready: %u entries, PSRAM", LOG_CAPACITY);
@@ -96,9 +90,22 @@ esp_err_t structured_log_init(void)
 void structured_log_write(const char *tag, log_level_t level, const char *fmt, ...)
 {
     if (!atomic_load(&g_initialized) || !g_ring || !fmt) return;
-    if (!matches_filter(tag, level)) return;
 
-    uint32_t seq = atomic_fetch_add_explicit(&g_head, 1, memory_order_relaxed);
+    /* 
+     * Non-blocking lock acquisition. 
+     * If the system is heavily contended or a task is deadlocked holding 
+     * the log lock, we drop the log message rather than hanging the caller.
+     */
+    if (xSemaphoreTake(g_lock, 0) != pdTRUE) {
+        return; 
+    }
+
+    if (!matches_filter_locked(tag, level)) {
+        xSemaphoreGive(g_lock);
+        return;
+    }
+
+    uint32_t seq = g_head++;
     uint32_t idx = ring_index(seq);
 
     log_entry_t *e = &g_ring[idx];
@@ -115,17 +122,23 @@ void structured_log_write(const char *tag, log_level_t level, const char *fmt, .
     va_start(ap, fmt);
     vsnprintf(e->message, sizeof(e->message), fmt, ap);
     va_end(ap);
+
+    xSemaphoreGive(g_lock);
 }
 
 void structured_log_set_filter(const char *tag_substr, log_level_t min_level)
 {
-    atomic_store(&g_filter_set, true);
+    if (g_lock == NULL) return;
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    g_filter_set = true;
     g_filter_min = min_level;
     if (tag_substr) {
         snprintf(g_filter_tag, sizeof(g_filter_tag), "%s", tag_substr);
     } else {
         g_filter_tag[0] = '\0';
     }
+    xSemaphoreGive(g_lock);
 }
 
 static cJSON *entry_to_json(const log_entry_t *e)
@@ -138,7 +151,10 @@ static cJSON *entry_to_json(const log_entry_t *e)
     cJSON_AddNumberToObject(obj, "level", (int)e->level);
 
     cJSON *msg = cJSON_CreateString(e->message);
-    if (!msg) { cJSON_Delete(obj); return NULL; }
+    if (!msg) { 
+        cJSON_Delete(obj); 
+        return NULL; 
+    }
     cJSON_AddItemToObject(obj, "msg", msg);
 
     return obj;
@@ -148,52 +164,80 @@ esp_err_t structured_log_export_json(const char *path)
 {
     if (!atomic_load(&g_initialized) || !g_ring || !path) return ESP_ERR_INVALID_STATE;
 
-    uint32_t total = (uint32_t)atomic_load(&g_head);
-    if (total == 0) return ESP_OK;
-
-    uint32_t start = (total > LOG_CAPACITY) ? (total - LOG_CAPACITY) : 0;
-
-    cJSON *root = cJSON_CreateArray();
-    if (!root) return ESP_ERR_NO_MEM;
-
-    for (uint32_t i = start; i < total; i++) {
-        const log_entry_t *e = &g_ring[ring_index(i)];
-        if (e->message[0] == '\0') continue;
-        cJSON *obj = entry_to_json(e);
-        if (!obj) continue;
-        cJSON_AddItemToArray(root, obj);
-    }
-
-    char *out = cJSON_Print(root);
-    cJSON_Delete(root);
-    if (!out) return ESP_ERR_NO_MEM;
-
     FILE *f = fopen(path, "w");
     if (!f) {
-        free(out);
+        ESP_LOGE(TAG, "Failed to open %s for log export", path);
         return ESP_ERR_NOT_FOUND;
     }
 
-    fwrite(out, 1, strlen(out), f);
-    fclose(f);
-    fsync(fileno(f));
+    fprintf(f, "[\n");
 
-    free(out);
-    ESP_LOGI(TAG, "Exported %u entries to %s", total, path);
+    uint32_t total = 0;
+    uint32_t start = 0;
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    total = g_head;
+    start = (total > LOG_CAPACITY) ? (total - LOG_CAPACITY) : 0;
+    xSemaphoreGive(g_lock);
+
+    bool first = true;
+    uint32_t exported_count = 0;
+
+    for (uint32_t i = start; i < total; i++) {
+        log_entry_t local_e;
+
+        xSemaphoreTake(g_lock, portMAX_DELAY);
+        memcpy(&local_e, &g_ring[ring_index(i)], sizeof(log_entry_t));
+        xSemaphoreGive(g_lock);
+
+        if (local_e.message[0] == '\0') continue;
+
+        cJSON *obj = entry_to_json(&local_e);
+        if (!obj) continue;
+
+        char *out = cJSON_PrintUnformatted(obj);
+        cJSON_Delete(obj);
+
+        if (out) {
+            if (!first) {
+                fprintf(f, ",\n");
+            }
+            fprintf(f, "%s", out);
+            cJSON_free(out);
+            first = false;
+            exported_count++;
+        }
+    }
+
+    fprintf(f, "\n]\n");
+    fclose(f);
+
+    ESP_LOGI(TAG, "Exported %u entries to %s", exported_count, path);
     return ESP_OK;
 }
 
 void structured_log_clear(void)
 {
-    if (!atomic_load(&g_initialized) || !g_ring) return;
+    if (!atomic_load(&g_initialized) || !g_ring || !g_lock) return;
+    
+    xSemaphoreTake(g_lock, portMAX_DELAY);
     memset(g_ring, 0, LOG_CAPACITY * sizeof(log_entry_t));
-    atomic_store(&g_head, 0);
+    g_head = 0;
+    xSemaphoreGive(g_lock);
+    
     ESP_LOGI(TAG, "Log ring cleared");
 }
 
 size_t structured_log_count(void)
 {
-    uint32_t total = (uint32_t)atomic_load(&g_head);
+    if (!atomic_load(&g_initialized)) return 0;
+    
+    uint32_t total = 0;
+    if (g_lock) {
+        xSemaphoreTake(g_lock, portMAX_DELAY);
+        total = g_head;
+        xSemaphoreGive(g_lock);
+    }
     return (total > LOG_CAPACITY) ? LOG_CAPACITY : total;
 }
 

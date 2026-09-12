@@ -8,16 +8,40 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "deauth_engine.h"
+
+#include <string.h>
+#include <stdio.h>
+#include <inttypes.h>
+
 #include "esp_err.h"
 #include "esp_log.h"
-#include "string.h"
-#include "stdio.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "nvs";
 static const char *NS = "reaper";
 
-esp_err_t nvs_persist_init(void)
+static SemaphoreHandle_t g_nvs_lock = NULL;
+
+#define MAX_SAVED_TARGETS 100
+#define MAX_SAVED_WORDLISTS 16
+
+typedef struct {
+    char name[64];
+    size_t count;
+    uint32_t duration_ms;
+} wordlist_meta_t;
+
+esp_err_t persist_init(void)
 {
+    if (g_nvs_lock == NULL) {
+        g_nvs_lock = xSemaphoreCreateMutex();
+        if (g_nvs_lock == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -35,136 +59,174 @@ static nvs_handle_t open_handle(bool write)
 
 /* ── Simple scalar helpers ─────────────────────────────────────────────── */
 
-esp_err_t nvs_set_u32(const char *key, uint32_t value)
+esp_err_t persist_set_u32(const char *key, uint32_t value)
 {
+    if (!key || !g_nvs_lock) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
+    
     nvs_handle_t h = open_handle(true);
-    if (!h) return ESP_FAIL;
+    if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_FAIL; }
+    
     esp_err_t ret = nvs_set_u32(h, key, value);
     if (ret == ESP_OK) ret = nvs_commit(h);
     nvs_close(h);
+    
+    xSemaphoreGive(g_nvs_lock);
     return ret;
 }
 
-esp_err_t nvs_get_u32(const char *key, uint32_t *out, uint32_t def)
+esp_err_t persist_get_u32(const char *key, uint32_t *out, uint32_t def)
 {
-    if (!out) return ESP_ERR_INVALID_ARG;
+    if (!out || !key || !g_nvs_lock) return ESP_ERR_INVALID_ARG;
     *out = def;
+    
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
     nvs_handle_t h = open_handle(false);
-    if (!h) return ESP_ERR_NOT_FOUND;
+    if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_ERR_NOT_FOUND; }
+    
     esp_err_t ret = nvs_get_u32(h, key, out);
     nvs_close(h);
+    
+    xSemaphoreGive(g_nvs_lock);
     return ret;
 }
 
-esp_err_t nvs_set_u8(const char *key, uint8_t value)
+esp_err_t persist_set_u8(const char *key, uint8_t value)
 {
+    if (!key || !g_nvs_lock) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
+    
     nvs_handle_t h = open_handle(true);
-    if (!h) return ESP_FAIL;
+    if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_FAIL; }
+    
     esp_err_t ret = nvs_set_u8(h, key, value);
     if (ret == ESP_OK) ret = nvs_commit(h);
     nvs_close(h);
+    
+    xSemaphoreGive(g_nvs_lock);
     return ret;
 }
 
-esp_err_t nvs_get_u8(const char *key, uint8_t *out, uint8_t def)
+esp_err_t persist_get_u8(const char *key, uint8_t *out, uint8_t def)
 {
-    if (!out) return ESP_ERR_INVALID_ARG;
+    if (!out || !key || !g_nvs_lock) return ESP_ERR_INVALID_ARG;
     *out = def;
+    
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
     nvs_handle_t h = open_handle(false);
-    if (!h) return ESP_ERR_NOT_FOUND;
+    if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_ERR_NOT_FOUND; }
+    
     esp_err_t ret = nvs_get_u8(h, key, out);
     nvs_close(h);
+    
+    xSemaphoreGive(g_nvs_lock);
     return ret;
 }
 
-esp_err_t nvs_set_bool(const char *key, bool value)
+esp_err_t persist_set_bool(const char *key, bool value)
 {
-    nvs_handle_t h = open_handle(true);
-    if (!h) return ESP_FAIL;
-    esp_err_t ret = nvs_set_u8(h, key, value ? 1 : 0);
-    if (ret == ESP_OK) ret = nvs_commit(h);
-    nvs_close(h);
-    return ret;
+    return persist_set_u8(key, value ? 1 : 0);
 }
 
-esp_err_t nvs_get_bool(const char *key, bool *out, bool def)
+esp_err_t persist_get_bool(const char *key, bool *out, bool def)
 {
     if (!out) return ESP_ERR_INVALID_ARG;
-    *out = def;
     uint8_t v = def ? 1 : 0;
-    esp_err_t ret = nvs_get_u8(key, &v, v);
-    if (ret == ESP_OK) *out = v;
+    esp_err_t ret = persist_get_u8(key, &v, v);
+    if (ret == ESP_OK) *out = (v != 0);
     return ret;
 }
 
-esp_err_t nvs_set_str(const char *key, const char *value)
+esp_err_t persist_set_str(const char *key, const char *value)
 {
-    if (!key || !value) return ESP_ERR_INVALID_ARG;
+    if (!key || !value || !g_nvs_lock) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
+    
     nvs_handle_t h = open_handle(true);
-    if (!h) return ESP_FAIL;
+    if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_FAIL; }
+    
     esp_err_t ret = nvs_set_str(h, key, value);
     if (ret == ESP_OK) ret = nvs_commit(h);
     nvs_close(h);
+    
+    xSemaphoreGive(g_nvs_lock);
     return ret;
 }
 
-esp_err_t nvs_get_str(const char *key, char *out, size_t out_len, const char *def)
+esp_err_t persist_get_str(const char *key, char *out, size_t out_len, const char *def)
 {
-    if (!out || !out_len) return ESP_ERR_INVALID_ARG;
+    if (!out || !out_len || !key || !g_nvs_lock) return ESP_ERR_INVALID_ARG;
     out[0] = '\0';
+    
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
     nvs_handle_t h = open_handle(false);
-    if (!h) {
+    if (!h) { 
         if (def) snprintf(out, out_len, "%s", def);
-        return ESP_ERR_NOT_FOUND;
+        xSemaphoreGive(g_nvs_lock);
+        return ESP_ERR_NOT_FOUND; 
     }
-    esp_err_t ret = nvs_get_str(h, key, out, &out_len);
+    
+    size_t len = out_len;
+    esp_err_t ret = nvs_get_str(h, key, out, &len);
     nvs_close(h);
+    
     if (ret != ESP_OK && def) {
         snprintf(out, out_len, "%s", def);
     }
+    
+    xSemaphoreGive(g_nvs_lock);
     return ret;
 }
 
 /* ── Target list persistence ─────────────────────────────────────────── */
 
-#define MAX_SAVED_TARGETS 100
-
-esp_err_t nvs_save_targets(const deauth_target_t *targets, size_t count)
+esp_err_t persist_save_targets(const deauth_target_t *targets, size_t count)
 {
-    if (!targets || count == 0 || count > MAX_SAVED_TARGETS) return ESP_ERR_INVALID_ARG;
+    if (!targets || count == 0 || count > MAX_SAVED_TARGETS || !g_nvs_lock) return ESP_ERR_INVALID_ARG;
+    
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
     nvs_handle_t h = open_handle(true);
-    if (!h) return ESP_FAIL;
+    if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_FAIL; }
+
+    /* Clean up old keys to prevent NVS bloat */
+    char key[16];
+    for (int i = 0; i < MAX_SAVED_TARGETS; i++) {
+        snprintf(key, sizeof(key), "tgt_%d", i);
+        nvs_erase_key(h, key); /* Ignore errors if key doesn't exist */
+    }
 
     esp_err_t ret = nvs_set_u32(h, "tgts_n", (uint32_t)count);
-    if (ret != ESP_OK) { nvs_close(h); return ret; }
+    if (ret != ESP_OK) { nvs_close(h); xSemaphoreGive(g_nvs_lock); return ret; }
 
-    char key[8];
     for (size_t i = 0; i < count; i++) {
         snprintf(key, sizeof(key), "tgt_%d", (int)i);
         ret = nvs_set_blob(h, key, &targets[i], sizeof(deauth_target_t));
-        if (ret != ESP_OK) { nvs_close(h); return ret; }
+        if (ret != ESP_OK) { nvs_close(h); xSemaphoreGive(g_nvs_lock); return ret; }
     }
 
     ret = nvs_commit(h);
     nvs_close(h);
+    xSemaphoreGive(g_nvs_lock);
     return ret;
 }
 
-esp_err_t nvs_load_targets(deauth_target_t *targets, size_t max, size_t *count)
+esp_err_t persist_load_targets(deauth_target_t *targets, size_t max, size_t *count)
 {
-    if (!targets || !count || max == 0) return ESP_ERR_INVALID_ARG;
+    if (!targets || !count || max == 0 || !g_nvs_lock) return ESP_ERR_INVALID_ARG;
     *count = 0;
+    
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
     nvs_handle_t h = open_handle(false);
-    if (!h) return ESP_ERR_NOT_FOUND;
+    if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_ERR_NOT_FOUND; }
 
     uint32_t n = 0;
-    esp_err_t ret = nvs_get_u32(h, "tgts_n", &n, 0);
-    if (ret != ESP_OK || n == 0) { nvs_close(h); return ESP_OK; }
+    esp_err_t ret = nvs_get_u32(h, "tgts_n", &n);
+    if (ret != ESP_OK || n == 0) { nvs_close(h); xSemaphoreGive(g_nvs_lock); return ESP_OK; }
 
     if (n > MAX_SAVED_TARGETS) n = MAX_SAVED_TARGETS;
     if (n > max) n = (uint32_t)max;
 
-    char key[8];
+    char key[16];
     for (uint32_t i = 0; i < n; i++) {
         snprintf(key, sizeof(key), "tgt_%d", (int)i);
         size_t sz = sizeof(deauth_target_t);
@@ -174,71 +236,71 @@ esp_err_t nvs_load_targets(deauth_target_t *targets, size_t max, size_t *count)
     }
 
     nvs_close(h);
+    xSemaphoreGive(g_nvs_lock);
     return ESP_OK;
 }
 
 /* ── Wordlist metadata persistence ───────────────────────────────────── */
 
-#define MAX_SAVED_WORDLISTS 16
-
-typedef struct {
-    char name[64];
-    size_t count;
-    uint32_t duration_ms;
-} wordlist_meta_t;
-
-esp_err_t nvs_save_wordlist_meta(const char *name, size_t count, uint32_t duration_ms)
+esp_err_t persist_save_wordlist_meta(const char *name, size_t count, uint32_t duration_ms)
 {
-    if (!name) return ESP_ERR_INVALID_ARG;
+    if (!name || !g_nvs_lock) return ESP_ERR_INVALID_ARG;
+    
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
     nvs_handle_t h = open_handle(true);
-    if (!h) return ESP_FAIL;
+    if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_FAIL; }
 
-    uint32_t n = 1;
-    esp_err_t ret = nvs_set_u32(h, "wl_n", 1);
-    if (ret == ESP_OK) {
-        wordlist_meta_t m;
-        memset(&m, 0, sizeof(m));
-        snprintf(m.name, sizeof(m.name), "%s", name);
-        m.count = count;
-        m.duration_ms = duration_ms;
-        ret = nvs_set_blob(h, "wl_0", &m, sizeof(m));
-    }
+    wordlist_meta_t m;
+    memset(&m, 0, sizeof(m));
+    snprintf(m.name, sizeof(m.name), "%s", name);
+    m.count = count;
+    m.duration_ms = duration_ms;
+    
+    esp_err_t ret = nvs_set_blob(h, "wl_meta", &m, sizeof(m));
     if (ret == ESP_OK) ret = nvs_commit(h);
+    
     nvs_close(h);
+    xSemaphoreGive(g_nvs_lock);
     return ret;
 }
 
-esp_err_t nvs_load_wordlist_meta(size_t max, size_t *count)
+esp_err_t persist_load_wordlist_meta(char *name_out, size_t name_sz, size_t *count_out, uint32_t *duration_out)
 {
-    if (!count || max == 0) return ESP_ERR_INVALID_ARG;
-    *count = 0;
+    if (!name_out || !name_sz || !count_out || !duration_out || !g_nvs_lock) return ESP_ERR_INVALID_ARG;
+    
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
     nvs_handle_t h = open_handle(false);
-    if (!h) return ESP_ERR_NOT_FOUND;
-
-    uint32_t n = 0;
-    esp_err_t ret = nvs_get_u32(h, "wl_n", &n, 0);
-    if (ret != ESP_OK || n == 0) { nvs_close(h); return ESP_OK; }
-
-    if (n > MAX_SAVED_WORDLISTS) n = MAX_SAVED_WORDLISTS;
-    if (n > max) n = (uint32_t)max;
+    if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_ERR_NOT_FOUND; }
 
     wordlist_meta_t m;
     size_t sz = sizeof(m);
-    ret = nvs_get_blob(h, "wl_0", &m, &sz);
-    if (ret == ESP_OK) (*count)++;
-
+    esp_err_t ret = nvs_get_blob(h, "wl_meta", &m, &sz);
     nvs_close(h);
-    return ESP_OK;
+    
+    if (ret == ESP_OK) {
+        snprintf(name_out, name_sz, "%s", m.name);
+        *count_out = m.count;
+        *duration_out = m.duration_ms;
+    }
+    
+    xSemaphoreGive(g_nvs_lock);
+    return ret;
 }
 
 /* ── Factory reset ───────────────────────────────────────────────────── */
 
-esp_err_t nvs_erase_all(void)
+esp_err_t persist_erase_all(void)
 {
+    if (!g_nvs_lock) return ESP_ERR_INVALID_STATE;
+    
+    xSemaphoreTake(g_nvs_lock, portMAX_DELAY);
     nvs_handle_t h = open_handle(true);
-    if (!h) return ESP_FAIL;
+    if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_FAIL; }
+    
     esp_err_t ret = nvs_erase_all(h);
     if (ret == ESP_OK) ret = nvs_commit(h);
+    
     nvs_close(h);
+    xSemaphoreGive(g_nvs_lock);
     return ret;
 }

@@ -4,28 +4,44 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Initialize watchdog + panic handler. */
+/**
+ * @brief Initialize watchdog supervisor and check for previous crash logs.
+ * 
+ * If the device previously panicked, this function safely writes the crash 
+ * context to SPIFFS from a normal task context.
+ */
 esp_err_t watchdog_init(void);
 
-/* Refresh the calling task's watchdog subscription. */
+/**
+ * @brief Subscribe the calling task to the Task WDT (if not already) and reset it.
+ */
 void watchdog_task_refresh(const char *task_name);
 
-/* Force a panic for testing. */
+/**
+ * @brief Force a panic for testing purposes.
+ */
 void watchdog_test_panic(void);
 
-/* Read last crash log from SPIFFS. */
+/**
+ * @brief Read the last crash log from SPIFFS.
+ */
 esp_err_t watchdog_read_crash(char *out, size_t out_len);
 
-/* Clear crash log. */
+/**
+ * @brief Clear the crash log from SPIFFS.
+ */
 void watchdog_clear_crash(void);
 
-/* Check if a panic occurred since last boot. */
-bool watchdog_had_panic(void);
+/**
+ * @brief Check if a crash log currently exists on SPIFFS.
+ */
+bool watchdog_has_crash_log(void);
 
 #ifdef __cplusplus
 }

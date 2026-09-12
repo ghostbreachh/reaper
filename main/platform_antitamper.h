@@ -17,4 +17,5 @@ esp_err_t platform_antitamper_get_report(char *out, size_t max_len);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* PLATFORM_ANTITAMPER_H */

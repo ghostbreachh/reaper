@@ -1,176 +1,217 @@
 #include "wardrive.h"
 #include "gps.h"
-#include "coex.h"
-#include "wifi_sniffer.h"
-#include "ble_scanner.h"
-#include "ai_ble_profiler.h"
 #include "storage_sd.h"
+
 #include <stdio.h>
 #include <string.h>
-#include <stdarg.h>
+#include <inttypes.h>
+#include <ctype.h>
+
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_timer.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "esp_timer.h"
 
 static const char *TAG = "wardrive";
 
-/* Current wardrive state. */
-static wardrive_mode_t g_mode = WARDIRVE_MODE_OFF;
+#define WARDRIVE_FLUSH_INTERVAL 32
+
+static wardrive_mode_t g_mode = WARDRIVE_MODE_OFF;
 static FILE *g_file = NULL;
-static SemaphoreHandle_t g_lock;
-static uint32_t g_wifi_points;
-static uint32_t g_ble_points;
-static uint32_t g_geo_points;
-static uint32_t g_skipped_no_geo;
-static uint64_t g_start_us;
-static char g_path[128];
+static SemaphoreHandle_t g_lock = NULL;
+
+static uint32_t g_wifi_points = 0;
+static uint32_t g_ble_points = 0;
+static uint32_t g_geo_points = 0;
+static uint32_t g_no_geo_points = 0;
+static uint32_t g_since_flush = 0;
+static bool g_first_point = true;
+
+static uint64_t g_start_us = 0;
+static char g_path[128] = {0};
 
 static const char *mode_to_str(wardrive_mode_t mode)
 {
     switch (mode) {
-        case WARDIRVE_MODE_WIFI: return "wifi";
-        case WARDIRVE_MODE_BLE: return "ble";
-        case WARDIRVE_MODE_BOTH: return "both";
-        default: return "off";
+        case WARDRIVE_MODE_WIFI: return "wifi";
+        case WARDRIVE_MODE_BLE:  return "ble";
+        case WARDRIVE_MODE_BOTH: return "both";
+        default:                 return "off";
     }
 }
 
-static wardrive_mode_t str_to_mode(const char *s)
-{
-    if (strcmp(s, "wifi") == 0) return WARDIRVE_MODE_WIFI;
-    if (strcmp(s, "ble") == 0) return WARDIRVE_MODE_BLE;
-    if (strcmp(s, "both") == 0) return WARDIRVE_MODE_BOTH;
-    return WARDIRVE_MODE_OFF;
-}
-
-static void close_file(void)
+static void close_file_locked(void)
 {
     if (g_file != NULL) {
         fclose(g_file);
         g_file = NULL;
     }
+    g_since_flush = 0;
+    g_first_point = true;
+}
+
+static size_t json_escape_string(char *dst, size_t dst_sz, const char *src)
+{
+    if (!dst || dst_sz == 0) return 0;
+    if (!src) { dst[0] = '\0'; return 0; }
+
+    size_t j = 0;
+    for (size_t i = 0; src[i] != '\0' && j + 1 < dst_sz; i++) {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '"' || c == '\\') {
+            if (j + 2 >= dst_sz) break;
+            dst[j++] = '\\';
+            dst[j++] = (char)c;
+        } else if (c < 0x20) {
+            dst[j++] = ' ';
+        } else {
+            dst[j++] = (char)c;
+        }
+    }
+    dst[j] = '\0';
+    return j;
+}
+
+static bool get_gps_coords(char *lat_str, size_t lat_sz,
+                           char *lon_str, size_t lon_sz)
+{
+    gps_fix_t fix;
+    if (gps_get_fix(&fix) == ESP_OK && fix.valid) {
+        snprintf(lat_str, lat_sz, "%.6f", fix.latitude);
+        snprintf(lon_str, lon_sz, "%.6f", fix.longitude);
+        return true;
+    }
+    return false;
 }
 
 esp_err_t wardrive_init(void)
 {
+    if (g_lock != NULL) {
+        return ESP_OK;
+    }
+
     g_lock = xSemaphoreCreateMutex();
     if (g_lock == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    g_mode = WARDIRVE_MODE_OFF;
+
+    g_mode = WARDRIVE_MODE_OFF;
     g_wifi_points = 0;
     g_ble_points = 0;
     g_geo_points = 0;
-    g_skipped_no_geo = 0;
+    g_no_geo_points = 0;
     g_start_us = 0;
+    g_since_flush = 0;
+    g_first_point = true;
     memset(g_path, 0, sizeof(g_path));
-    ESP_LOGI(TAG, "wardrive init");
+
+    ESP_LOGI(TAG, "Wardrive module initialized");
     return ESP_OK;
 }
 
 esp_err_t wardrive_start(wardrive_mode_t mode)
 {
-    if (mode == WARDIRVE_MODE_OFF) {
+    if (mode == WARDRIVE_MODE_OFF) {
         return wardrive_stop();
     }
 
-    esp_err_t rc = ESP_OK;
+    if (g_lock == NULL) {
+        esp_err_t rc = wardrive_init();
+        if (rc != ESP_OK) return rc;
+    }
+
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 
-    close_file();
+    if (g_mode != WARDRIVE_MODE_OFF) {
+        xSemaphoreGive(g_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    close_file_locked();
+    
     g_wifi_points = 0;
     g_ble_points = 0;
     g_geo_points = 0;
-    g_skipped_no_geo = 0;
-    g_mode = mode;
+    g_no_geo_points = 0;
     g_start_us = esp_timer_get_time();
+    g_mode = mode;
+    g_first_point = true;
 
-    snprintf(g_path, sizeof(g_path), "/sd/wardrive_%" PRIu64 ".jsonl",
-             g_start_us);
+    snprintf(g_path, sizeof(g_path), "/sd/wardrive_%" PRIu64 ".json", g_start_us);
 
-    rc = storage_sd_mount();
-    if (rc != ESP_OK) {
+    esp_err_t rc = storage_sd_mount(); 
+    if (rc != ESP_OK && rc != ESP_ERR_INVALID_STATE) { 
         ESP_LOGE(TAG, "SD mount failed: %s", esp_err_to_name(rc));
-        g_mode = WARDIRVE_MODE_OFF;
+        g_mode = WARDRIVE_MODE_OFF;
         xSemaphoreGive(g_lock);
         return rc;
     }
 
     g_file = fopen(g_path, "w");
     if (g_file == NULL) {
-        ESP_LOGE(TAG, "failed to open %s", g_path);
-        g_mode = WARDIRVE_MODE_OFF;
+        ESP_LOGE(TAG, "Failed to open %s", g_path);
+        g_mode = WARDRIVE_MODE_OFF;
         xSemaphoreGive(g_lock);
         return ESP_ERR_NO_MEM;
     }
 
-    fprintf(g_file,
-            "{\"mode\":\"%s\",\"start_us\":%" PRIu64 ",\"points\":[}\n",
+    fprintf(g_file, "{\"mode\":\"%s\",\"start_us\":%" PRIu64 ",\"points\":[\n",
             mode_to_str(mode), g_start_us);
-    fflush(g_file);
-
-    ESP_LOGI(TAG, "wardrive start mode=%s path=%s", mode_to_str(mode), g_path);
+    
+    ESP_LOGI(TAG, "Wardrive started: mode=%s path=%s", mode_to_str(mode), g_path);
     xSemaphoreGive(g_lock);
     return ESP_OK;
 }
 
 esp_err_t wardrive_stop(void)
 {
+    if (g_lock == NULL) return ESP_OK;
+
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
 
     if (g_file != NULL) {
         uint64_t end_us = esp_timer_get_time();
-        fprintf(g_file, "],\"end_us\":%" PRIu64 "}\n", end_us);
+        fprintf(g_file, "\n],\"end_us\":%" PRIu64 "}\n", end_us);
         fflush(g_file);
-        close_file();
+        close_file_locked();
     }
 
     wardrive_mode_t prev = g_mode;
-    g_mode = WARDIRVE_MODE_OFF;
-    ESP_LOGI(TAG, "wardrive stop mode=%s points wifi=%u ble=%u geo=%u skip=%u",
-             mode_to_str(prev), g_wifi_points, g_ble_points,
-             g_geo_points, g_skipped_no_geo);
+    g_mode = WARDRIVE_MODE_OFF;
+    
+    ESP_LOGI(TAG, "Wardrive stopped: mode=%s wifi=%"PRIu32" ble=%"PRIu32" geo=%"PRIu32" no_geo=%"PRIu32,
+             mode_to_str(prev), g_wifi_points, g_ble_points, g_geo_points, g_no_geo_points);
+             
     xSemaphoreGive(g_lock);
     return ESP_OK;
 }
 
-static esp_err_t write_point(const char *json)
+static void flush_if_needed_locked(void)
 {
-    if (g_file == NULL) return ESP_ERR_INVALID_STATE;
-    if (g_wifi_points + g_ble_points == 0) {
-        fprintf(g_file, "%s", json);
-    } else {
-        fprintf(g_file, ",%s", json);
+    if (g_file != NULL) {
+        g_since_flush++;
+        if (g_since_flush >= WARDRIVE_FLUSH_INTERVAL) {
+            fflush(g_file);
+            g_since_flush = 0;
+        }
     }
-    fflush(g_file);
-    return ESP_OK;
-}
-
-static bool have_gps(char *lat_str, size_t lat_sz,
-                     char *lon_str, size_t lon_sz)
-{
-    gps_fix_t fix;
-    if (!gps_get_fix(&fix) || !fix.valid) {
-        return false;
-    }
-    snprintf(lat_str, lat_sz, "%.6f", fix.latitude);
-    snprintf(lon_str, lon_sz, "%.6f", fix.longitude);
-    return true;
 }
 
 esp_err_t wardrive_log_wifi(const char *bssid, const char *ssid,
                             int8_t rssi, uint8_t channel,
                             const char *security)
 {
-    if (g_mode != WARDIRVE_MODE_WIFI && g_mode != WARDIRVE_MODE_BOTH) {
+    if (g_mode != WARDRIVE_MODE_WIFI && g_mode != WARDRIVE_MODE_BOTH) {
         return ESP_OK;
     }
+    if (g_lock == NULL) return ESP_ERR_INVALID_STATE;
+
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
@@ -179,50 +220,38 @@ esp_err_t wardrive_log_wifi(const char *bssid, const char *ssid,
         return ESP_ERR_INVALID_STATE;
     }
 
-    char lat[32] = "";
-    char lon[32] = "";
-    bool geo = have_gps(lat, sizeof(lat), lon, sizeof(lon));
-    if (!geo) {
-        g_skipped_no_geo++;
-        xSemaphoreGive(g_lock);
-        return ESP_OK;
-    }
+    char lat[32] = "null";
+    char lon[32] = "null";
+    bool geo = get_gps_coords(lat, sizeof(lat), lon, sizeof(lon));
+    
+    if (geo) g_geo_points++;
+    else g_no_geo_points++;
 
-    g_geo_points++;
     g_wifi_points++;
 
-    char safe_ssid[64];
-    safe_ssid[0] = '\0';
-    if (ssid != NULL) {
-        size_t i;
-        for (i = 0; i < sizeof(safe_ssid) - 1 && ssid[i] != '\0'; i++) {
-            if (ssid[i] == '"' || ssid[i] == '\\') {
-                safe_ssid[i] = '\\';
-            } else {
-                safe_ssid[i] = ssid[i];
-            }
-        }
-        safe_ssid[i] = '\0';
-    }
+    char safe_ssid[65] = "";
+    json_escape_string(safe_ssid, sizeof(safe_ssid), ssid);
 
-    char safe_sec[32];
-    safe_sec[0] = '\0';
-    if (security != NULL) {
-        strncpy(safe_sec, security, sizeof(safe_sec) - 1);
-        safe_sec[sizeof(safe_sec) - 1] = '\0';
+    char safe_sec[32] = "";
+    json_escape_string(safe_sec, sizeof(safe_sec), security);
+
+    if (!g_first_point) {
+        fprintf(g_file, ",\n");
     }
+    g_first_point = false;
 
     fprintf(g_file,
             "{\"t\":\"w\",\"ts\":%" PRIu64 ",\"bssid\":\"%s\",\"ssid\":\"%s\","
             "\"rssi\":%d,\"ch\":%u,\"sec\":\"%s\","
-            "\"lat\":%s,\"lon\":%s}\n",
+            "\"lat\":%s,\"lon\":%s}",
             (uint64_t)esp_timer_get_time(),
-            bssid ? bssid : "",
+            bssid ? bssid : "00:00:00:00:00:00",
             safe_ssid,
             (int)rssi, (unsigned)channel,
             safe_sec,
             lat, lon);
-    fflush(g_file);
+            
+    flush_if_needed_locked();
     xSemaphoreGive(g_lock);
     return ESP_OK;
 }
@@ -230,9 +259,11 @@ esp_err_t wardrive_log_wifi(const char *bssid, const char *ssid,
 esp_err_t wardrive_log_ble(const uint8_t *addr, const char *name,
                            int8_t rssi, uint8_t channel)
 {
-    if (g_mode != WARDIRVE_MODE_BLE && g_mode != WARDIRVE_MODE_BOTH) {
+    if (g_mode != WARDRIVE_MODE_BLE && g_mode != WARDRIVE_MODE_BOTH) {
         return ESP_OK;
     }
+    if (g_lock == NULL) return ESP_ERR_INVALID_STATE;
+
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
@@ -241,16 +272,13 @@ esp_err_t wardrive_log_ble(const uint8_t *addr, const char *name,
         return ESP_ERR_INVALID_STATE;
     }
 
-    char lat[32] = "";
-    char lon[32] = "";
-    bool geo = have_gps(lat, sizeof(lat), lon, sizeof(lon));
-    if (!geo) {
-        g_skipped_no_geo++;
-        xSemaphoreGive(g_lock);
-        return ESP_OK;
-    }
+    char lat[32] = "null";
+    char lon[32] = "null";
+    bool geo = get_gps_coords(lat, sizeof(lat), lon, sizeof(lon));
+    
+    if (geo) g_geo_points++;
+    else g_no_geo_points++;
 
-    g_geo_points++;
     g_ble_points++;
 
     char mac[18];
@@ -261,28 +289,23 @@ esp_err_t wardrive_log_ble(const uint8_t *addr, const char *name,
         snprintf(mac, sizeof(mac), "00:00:00:00:00:00");
     }
 
-    char safe_name[64];
-    safe_name[0] = '\0';
-    if (name != NULL) {
-        size_t i;
-        for (i = 0; i < sizeof(safe_name) - 1 && name[i] != '\0'; i++) {
-            if (name[i] == '"' || name[i] == '\\') {
-                safe_name[i] = '\\';
-            } else {
-                safe_name[i] = name[i];
-            }
-        }
-        safe_name[i] = '\0';
+    char safe_name[65] = "";
+    json_escape_string(safe_name, sizeof(safe_name), name);
+
+    if (!g_first_point) {
+        fprintf(g_file, ",\n");
     }
+    g_first_point = false;
 
     fprintf(g_file,
             "{\"t\":\"b\",\"ts\":%" PRIu64 ",\"mac\":\"%s\",\"name\":\"%s\","
-            "\"rssi\":%d,\"ch\":%u,\"lat\":%s,\"lon\":%s}\n",
+            "\"rssi\":%d,\"ch\":%u,\"lat\":%s,\"lon\":%s}",
             (uint64_t)esp_timer_get_time(),
             mac, safe_name,
             (int)rssi, (unsigned)channel,
             lat, lon);
-    fflush(g_file);
+            
+    flush_if_needed_locked();
     xSemaphoreGive(g_lock);
     return ESP_OK;
 }
@@ -290,17 +313,21 @@ esp_err_t wardrive_log_ble(const uint8_t *addr, const char *name,
 esp_err_t wardrive_get_stats(wardrive_stats_t *out)
 {
     if (out == NULL) return ESP_ERR_INVALID_ARG;
+    if (g_lock == NULL) return ESP_ERR_INVALID_STATE;
+
     if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
+    
     out->wifi_points = g_wifi_points;
     out->ble_points = g_ble_points;
     out->total_points = g_wifi_points + g_ble_points;
     out->start_us = g_start_us;
-    out->end_us = g_mode == WARDIRVE_MODE_OFF ? esp_timer_get_time() : 0;
+    out->end_us = (g_mode == WARDRIVE_MODE_OFF) ? esp_timer_get_time() : 0;
     out->geo_points = g_geo_points;
-    out->skipped_no_geo = g_skipped_no_geo;
+    out->no_geo_points = g_no_geo_points;
     snprintf(out->export_path, sizeof(out->export_path), "%s", g_path);
+    
     xSemaphoreGive(g_lock);
     return ESP_OK;
 }
@@ -308,17 +335,19 @@ esp_err_t wardrive_get_stats(wardrive_stats_t *out)
 esp_err_t wardrive_json(char *buf, size_t bufsz)
 {
     if (buf == NULL || bufsz == 0) return ESP_ERR_INVALID_ARG;
+    
     wardrive_stats_t st;
     esp_err_t rc = wardrive_get_stats(&st);
     if (rc != ESP_OK) return rc;
 
     int n = snprintf(buf, bufsz,
-                     "{\"mode\":\"%s\",\"wifi\":%u,\"ble\":%u,\"total\":%u,"
-                     "\"geo\":%u,\"skip\":%u,\"path\":\"%s\"}",
+                     "{\"mode\":\"%s\",\"wifi\":%"PRIu32",\"ble\":%"PRIu32",\"total\":%"PRIu32","
+                     "\"geo\":%"PRIu32",\"no_geo\":%"PRIu32",\"path\":\"%s\"}",
                      mode_to_str(g_mode),
                      st.wifi_points, st.ble_points, st.total_points,
-                     st.geo_points, st.skipped_no_geo,
+                     st.geo_points, st.no_geo_points,
                      st.export_path);
+                     
     return (n < 0 || (size_t)n >= bufsz) ? ESP_ERR_NO_MEM : ESP_OK;
 }
 

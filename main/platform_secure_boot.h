@@ -17,4 +17,5 @@ esp_err_t platform_secure_boot_get_fingerprint(char *out, size_t max_len);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* PLATFORM_SECURE_BOOT_H */

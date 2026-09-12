@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -37,30 +38,21 @@ typedef struct {
     uint8_t action_param[32]; /* mode string, target, etc. */
 } reaction_rule_t;
 
-/* Initialize reaction engine. */
 esp_err_t reaction_rules_init(void);
-
-/* Add rule; returns index or negative error. */
 int reaction_rules_add(const reaction_rule_t *rule);
-
-/* Remove rule by index. */
 esp_err_t reaction_rules_remove(uint8_t index);
-
-/* Get rule by index. */
 esp_err_t reaction_rules_get(uint8_t index, reaction_rule_t *out);
-
-/* List all rules as JSON. */
 esp_err_t reaction_rules_json(char *buf, size_t bufsz);
 
-/* Trigger checks — call from existing modules. */
+/* Trigger checks */
 esp_err_t reaction_rules_check_ap(const uint8_t *bssid, const char *ssid);
 esp_err_t reaction_rules_check_client(const uint8_t *client, const uint8_t *ap);
 esp_err_t reaction_rules_check_anomaly(float score);
 esp_err_t reaction_rules_check_ble(const uint8_t *addr);
 esp_err_t reaction_rules_check_handshake(void);
 esp_err_t reaction_rules_check_rogue(const char *ssid);
+esp_err_t reaction_rules_check_rogue_alerts(void);
 
-/* Deinit. */
 esp_err_t reaction_rules_deinit(void);
 
 #ifdef __cplusplus
