@@ -2,6 +2,11 @@
 #define HANDSHAKE_CRACK_H
 
 #include "common_types.h"
+#include "esp_err.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 esp_err_t handshake_init(void);
 esp_err_t handshake_capture_start(const uint8_t *bssid, const uint8_t *client_mac,
@@ -23,7 +28,13 @@ esp_err_t handshake_save_password(const char *ssid, const char *password);
 bool handshake_load_password(char *ssid, size_t ssid_sz, char *password, size_t pw_sz);
 esp_err_t handshake_erase_password(void);
 
-void handshake_feed_packet(const uint8_t *data, size_t len, uint8_t channel);
+/* Observer callback for wifi_sniffer */
+void handshake_feed_packet(const wifi_pkt_msg_t *msg);
+
 extern atomic_bool g_hs_capture_active;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // HANDSHAKE_CRACK_H

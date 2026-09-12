@@ -4,19 +4,23 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "esp_err.h"
 #include "common_types.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#define CH_HOP_CHANNEL_MIN  1
+#define CH_HOP_CHANNEL_MAX  13
+#define CH_HOP_MASK_ALL     ((uint16_t)0x1FFFu)
+
 /*
  * Smart channel hopper: configurable dwell time, sequential/random
  * traversal, and per-channel packet/RSSI statistics.
  *
- * Intended to replace the inline channel_hopper_task inside wifi_sniffer
- * with a single authoritative hopper shared by sniffer, analyzer, and
- * future radio subsystems.
+ * Intended to be the single authoritative hopper shared by sniffer,
+ * analyzer, and future radio subsystems.
  */
 
 typedef enum {
@@ -28,9 +32,26 @@ typedef enum {
 
 typedef struct {
     ch_hop_mode_t mode;
-    uint16_t dwell_ms;            /* 10..30000 ms; 0 means default 100 ms */
-    uint8_t  channel_mask;        /* bit0=ch1 .. bit12=ch13; 0xFF = all */
-    uint32_t dwell_us;            /* override: microsecond dwell; 0=use dwell_ms */
+
+    /*
+     * Dwell time in milliseconds.
+     * 0 means default 100 ms.
+     * Valid range is clamped internally.
+     */
+    uint16_t dwell_ms;
+
+    /*
+     * bit0 = channel 1 ... bit12 = channel 13.
+     * Must be uint16_t, not uint8_t, to represent all 13 channels.
+     */
+    uint16_t channel_mask;
+
+    /*
+     * Optional microsecond dwell override.
+     * If non-zero, this overrides dwell_ms.
+     * Values below 1000 use busy-wait for sub-millisecond dwell.
+     */
+    uint32_t dwell_us;
 } ch_hop_config_t;
 
 typedef struct {
@@ -38,20 +59,29 @@ typedef struct {
     uint32_t beacon_count;
     uint32_t mgmt_count;
     uint32_t data_count;
+
     int32_t  rssi_sum;
     uint32_t rssi_samples;
-    uint32_t adaptive_dwell_ms; /* current adaptive dwell for this channel */
+
+    uint32_t adaptive_dwell_ms;
+
+    /*
+     * Packet count observed during the current dwell window.
+     * Used by adaptive dwell logic.
+     */
+    uint32_t window_pkt_count;
+    uint64_t window_start_us;
 } ch_hop_stats_t;
 
 /*
  * Initialize channel hopper state.
- * Must be called once from wifi_sniffer_init().
+ * Must be called once before channel_hopper_start().
  */
 esp_err_t channel_hopper_init(void);
 
 /*
  * Start hopping with the given config.
- * Requires WiFi already in promiscuous mode.
+ * Requires Wi-Fi already in promiscuous mode.
  */
 esp_err_t channel_hopper_start(const ch_hop_config_t *cfg);
 
@@ -67,15 +97,22 @@ bool channel_hopper_is_active(void);
 
 /*
  * Set microsecond dwell override.
- * If us > 0, this overrides dwell_ms for sub-millisecond precision.
+ *
+ * If us == 0, restore default millisecond dwell.
+ * If us < 1000, use sub-millisecond busy-wait dwell.
+ * If us >= 1000, convert to clamped millisecond dwell.
  */
 esp_err_t channel_hopper_set_dwell_us(uint32_t us);
 
 /*
- * Get current microsecond dwell setting.
+ * Get current effective dwell in microseconds.
  */
 uint32_t channel_hopper_get_dwell_us(void);
 
+/*
+ * Get adaptive dwell for a channel.
+ * Returns 0 if channel invalid.
+ */
 uint32_t channel_hopper_adaptive_dwell(uint8_t channel);
 
 /*
@@ -84,7 +121,8 @@ uint32_t channel_hopper_adaptive_dwell(uint8_t channel);
 esp_err_t channel_hopper_get_stats(uint8_t channel, ch_hop_stats_t *out);
 
 /*
- * Snapshot all 13 channels into out[1..13].
+ * Snapshot all 14 stat slots into out.
+ * Index 0 is unused; channels are stored at out[1..13].
  */
 esp_err_t channel_hopper_get_all_stats(ch_hop_stats_t out[14]);
 

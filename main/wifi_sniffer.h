@@ -2,8 +2,24 @@
 #define WIFI_SNIFFER_H
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include "common_types.h"
+#include "esp_err.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* -------------------------------------------------------------------------
+ *  Observer Pattern for Packet Distribution
+ *  Modules (ARP, Handshake, AI, Wardrive) register here during their init.
+ * ----------------------------------------------------------------------- */
+typedef void (*wifi_pkt_observer_cb)(const wifi_pkt_msg_t *msg);
+esp_err_t wifi_sniffer_register_observer(wifi_pkt_observer_cb cb);
+
+/* -------------------------------------------------------------------------
+ *  Core API
+ * ----------------------------------------------------------------------- */
 esp_err_t wifi_sniffer_init(void);
 esp_err_t wifi_sniffer_start(uint32_t duration_sec);
 esp_err_t wifi_sniffer_start_pcap(uint32_t duration_sec);
@@ -35,5 +51,9 @@ void wifi_sniffer_print_clients_of_ap(const uint8_t *bssid);
 
 extern atomic_bool g_wifi_sniffer_active;
 extern _Atomic uint8_t g_wifi_fixed_channel;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // WIFI_SNIFFER_H

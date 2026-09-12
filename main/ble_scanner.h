@@ -2,6 +2,12 @@
 #define BLE_SCANNER_H
 
 #include "common_types.h"
+#include "esp_err.h"
+#include <stdio.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 esp_err_t ble_scanner_init(void);
 esp_err_t ble_scanner_start(uint32_t duration_sec);
@@ -35,8 +41,11 @@ bool ble_scanner_get_iso(const uint8_t *mac,
                          uint8_t *out_iso_channels, uint8_t out_bis[4],
                          uint32_t *out_interval_us);
 
-
 esp_err_t ble_advertise_start(const char *name, uint32_t duration_sec);
 esp_err_t ble_advertise_stop(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BLE_SCANNER_H

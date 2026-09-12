@@ -4,7 +4,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "esp_err.h"
 #include "common_types.h"
+#include "port_detect.h" /* Needed for port_transport_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,6 +31,9 @@ const cli_transport_t *cli_transport_get(void);
 
 // Re-read boot detection and switch active transport at runtime.
 esp_err_t cli_transport_switch(port_transport_t new_transport);
+
+// Start the CLI task
+esp_err_t cli_start(void);
 
 #ifdef __cplusplus
 }
