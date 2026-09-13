@@ -2460,7 +2460,7 @@ static esp_err_t rpc_storage_nvs_reset(const char *method, const char *params_js
                                        char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-    esp_err_t rc = nvs_erase_all();
+    esp_err_t rc = persist_erase_all();
     if (rc != ESP_OK) return rc;
     return jsonrpc_send_result(-1, "\"reset\"", out, out_sz);
 }

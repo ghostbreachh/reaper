@@ -20,7 +20,7 @@ esp_err_t platform_fleet_init(void)
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs);
     if (err == ESP_OK) {
         uint8_t en = 0;
-        if (nvs_get_u8(nvs, NVS_KEY, &en) == ESP_OK) {
+        if (persist_get_u8(nvs, NVS_KEY, &en) == ESP_OK) {
             atomic_store(&s_enabled, en != 0);
         }
         nvs_close(nvs);
@@ -38,7 +38,7 @@ esp_err_t platform_fleet_set_enabled(bool enable)
     nvs_handle_t nvs;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (err == ESP_OK) {
-        nvs_set_u8(nvs, NVS_KEY, enable ? 1 : 0);
+        persist_set_u8(nvs, NVS_KEY, enable ? 1 : 0);
         nvs_commit(nvs);
         nvs_close(nvs);
     } else {
