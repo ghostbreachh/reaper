@@ -13,6 +13,19 @@
  * ============================================================================
  */
 
+/* ─── Standard & ESP-IDF Baseline ───────────────────────────────────────── */
+/* 
+ * Include foundational types first. This acts as a safety net in case any 
+ * individual module header forgot to include <stdint.h> or "esp_err.h".
+ */
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#include "esp_err.h"
+#include "esp_log.h"
+
 /* ─── Core / Low-Level ──────────────────────────────────────────────────── */
 #include "common_types.h"
 #include "wifi_tx_fix.h"     /* Raw frame overrides / TX bypass */

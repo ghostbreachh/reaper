@@ -29,4 +29,5 @@ bool ft_roam_inject_reassoc_request(const uint8_t *src_bssid,
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* FT_ROAM_H */

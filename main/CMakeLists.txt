@@ -44,6 +44,7 @@ set(reaper_srcs
     cli_transport.c
     jsonrpc.c
     jsonrpc_schema.c
+    ota_http.c           # <-- ADDED: Was missing from build
     port_detect.c
     usb_cdc.c
 
@@ -64,6 +65,7 @@ set(reaper_srcs
     pcap_ring.c
     wifi_rrm.c
     wifi_sniffer.c
+    # wifi_tx_fix.c      # <-- ADD THIS if you have a .c file for it
 
     # ------------------------------------------------------------------
     # Wi-Fi security / field modules
@@ -164,8 +166,6 @@ set(priv_reqs
 # ----------------------------------------------------------------------
 # USB device support
 # ----------------------------------------------------------------------
-# If usb_cdc.c uses TinyUSB CDC, you need tinyusb.
-# If you instead use USB_SERIAL_JTAG, replace/add esp_driver_usb_serial_jtag.
 if(EXISTS "${IDF_PATH}/components/tinyusb")
     list(APPEND priv_reqs tinyusb)
 endif()
@@ -173,8 +173,6 @@ endif()
 # ----------------------------------------------------------------------
 # ESP-IDF 5.3+ split driver components
 # ----------------------------------------------------------------------
-# The generic `driver` component is still listed above for compatibility.
-# Add granular driver components when present.
 foreach(opt_drv
         esp_driver_gpio
         esp_driver_uart
@@ -194,8 +192,6 @@ idf_component_register(
 # ----------------------------------------------------------------------
 # Compiler warnings
 # ----------------------------------------------------------------------
-# Do not add -Werror yet.
-# First get the tree clean, then enable stricter enforcement.
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wall
     -Wextra
@@ -205,14 +201,6 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 # ----------------------------------------------------------------------
 # Raw 802.11 frame sanity-check override
 # ----------------------------------------------------------------------
-# This is only valid if one of your source files implements:
-#
-#   __wrap_ieee80211_raw_frame_sanity_check(...)
-#
-# The option must be INTERFACE so it propagates to the final ELF link.
-#
-# Long term, this should be behind a Kconfig option, default OFF, and
-# only enabled for authorized lab / research builds.
 target_link_options(${COMPONENT_LIB} INTERFACE
     "-Wl,--wrap=ieee80211_raw_frame_sanity_check"
 )

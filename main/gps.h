@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "esp_err.h"
 #include "common_types.h"
 
 #ifdef __cplusplus
@@ -30,9 +31,11 @@ int gps_format_coords(char *buf, size_t bufsz, const gps_fix_t *fix);
 /* Check whether GPS has a valid fix. */
 bool gps_is_valid(void);
 
+/* Inject a fix from an external source (e.g., Phone via JSON-RPC). */
 esp_err_t gps_set_fix(const gps_fix_t *fix);
 
 #ifdef __cplusplus
 }
 #endif
+
 #endif /* GPS_H */

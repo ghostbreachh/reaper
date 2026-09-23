@@ -17,17 +17,6 @@ typedef enum {
     HEALTH_AI_STATE_HEALING
 } health_ai_state_t;
 
-typedef struct {
-    uint32_t free_heap;
-    uint32_t free_psram;
-    int32_t cpu_temp_c;
-    uint32_t uptime_s;
-    uint32_t wifi_task_load;
-    uint32_t ble_task_load;
-    health_ai_state_t state;
-    char reason[64];
-} health_ai_metrics_t;
-
 esp_err_t health_ai_monitor_init(void);
 esp_err_t health_ai_monitor_update(void);
 health_ai_state_t health_ai_monitor_state(void);
@@ -38,4 +27,5 @@ esp_err_t health_ai_monitor_heal(void);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* HEALTH_AI_MONITOR_H */

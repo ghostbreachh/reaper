@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,7 +14,7 @@ typedef struct {
     uint32_t uptime_s;
     uint32_t free_heap;
     uint32_t free_psram;
-    int32_t  cpu_temp_c;
+    int32_t  cpu_temp_c;    /* Stored as centi-degrees (e.g. 4525 = 45.25 C). INT32_MIN if invalid. */
     uint32_t min_free_heap;
 } health_metrics_t;
 

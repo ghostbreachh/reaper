@@ -27,4 +27,5 @@ void neighbor_report_clear(void);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* NEIGHBOR_REPORT_H */

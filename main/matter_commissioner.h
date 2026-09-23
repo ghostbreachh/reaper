@@ -10,14 +10,13 @@
 extern "C" {
 #endif
 
-/* Matter commissioner stub for future Thread-capable hardware.
+/* 
+ * Matter commissioner stub for future Thread-capable hardware.
  *
- *  Feature 93 — [HW] Matter commissioner
- *
- *  Current hardware: ESP32-S3 has no 802.15.4 radio.
- *  Matter over WiFi is theoretically possible but commissioning
- *  requires Thread or BLE. This module provides the API surface
- *  for future hardware with native Thread support.
+ * Current hardware: ESP32-S3 has no 802.15.4 radio.
+ * Matter over WiFi is theoretically possible but commissioning
+ * typically requires Thread or BLE. This module provides the API surface
+ * for future hardware with native Thread support.
  */
 
 esp_err_t matter_commissioner_init(void);
@@ -29,4 +28,5 @@ esp_err_t matter_commissioner_get_devices(char *out, size_t max_len);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* MATTER_COMMISSIONER_H */

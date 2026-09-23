@@ -1,29 +1,33 @@
 #ifndef COMMON_TYPES_H
 #define COMMON_TYPES_H
 
+/* 
+ * Lightweight includes only. 
+ * Heavy headers like <stdio.h>, <string.h>, <stdlib.h> should be included 
+ * directly in the .c files that need them to speed up incremental builds.
+ */
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <ctype.h>
 #include <inttypes.h>
 #include <sys/time.h>
-#include <sys/stat.h>
 #include <time.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
 
 /* ==========================================================================
- *  GLOBAL CONSTANTS
+ *  GLOBAL MACROS
  * ========================================================================== */
+
+#ifndef MACSTR
+#define MACSTR "%02X:%02X:%02X:%02X:%02X:%02X"
+#define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
+#endif
 
 /* 
  * Maximum 802.11 frame size captured. 
  * 2346 bytes covers standard MSDU (2304) + MAC header (24) + FCS (4) + padding.
- * Centralized here to prevent mismatches between wifi_sniffer and pcap_ring.
  */
 #define WIFI_MAX_FRAME_SIZE 2346
 
@@ -75,11 +79,11 @@ typedef struct {
     /* Multi-BSSID & HE */
     uint8_t max_bssid_indicator;
     uint8_t bssid_index;
-    uint8_t he_mcs_nss; /* bit 0-3 = NSS, bit 4-7 = MCS */
-    uint8_t he_ppdu_type; /* 0=unknown, 1=he-mu, 2=he-su */
+    uint8_t he_mcs_nss; 
+    uint8_t he_ppdu_type; 
     
     /* Regulatory domain */
-    char country_code[3]; /* "US", "EU", "JP", etc. + null */
+    char country_code[3]; 
     uint8_t reg_class;
     uint8_t max_tx_power;
     
@@ -89,13 +93,10 @@ typedef struct {
     uint8_t fp_rate_count;
     uint8_t fp_ext_cap[8];
     uint8_t fp_ext_cap_len;
-    uint8_t fp_class; /* 0=unknown, 1=phone, 2=laptop, 3=iot, 4=ap, 5=router */
+    uint8_t fp_class; 
     char fp_label[32];
 
-    /* 
-     * Boolean flags grouped at the end to minimize compiler padding holes.
-     * Using uint8_t or bool is fine, but keeping them together saves RAM.
-     */
+    /* Boolean flags grouped at the end to minimize compiler padding holes. */
     bool pmf_capable;
     bool pmf_required;
     bool wpa3_sae;
@@ -134,10 +135,7 @@ typedef struct {
     struct timeval tv;
 } wifi_pkt_msg_t;
 
-/* 
- * Binary protocol structs MUST be packed to prevent compiler padding 
- * from corrupting file formats and network frames.
- */
+/* Binary protocol structs MUST be packed */
 typedef struct __attribute__((packed)) {
     uint16_t frame_ctrl;
     uint16_t duration;
@@ -179,23 +177,18 @@ typedef struct {
     uint32_t pkt_count;
     uint8_t tracker_score;
     
-    /* BT 5.0 extended advertising */
-    uint8_t adv_mode; /* 0=legacy, 1=non-conn, 2=scan */
-    uint8_t tx_power; /* dBm from AD ext header, if present */
+    uint8_t adv_mode; 
+    uint8_t tx_power; 
     
-    /* BT 5.0 periodic advertising / sync transfer */
-    uint16_t periodic_adv_interval; /* units of 1.25 ms, 0 = unknown */
-    uint8_t sync_handle; /* advertising SID from ADI or sync info */
+    uint16_t periodic_adv_interval; 
+    uint8_t sync_handle; 
     
-    /* BLE privacy / RPA */
-    uint8_t irk_hash[3];      /* lower 3 bytes of RPA hash */
+    uint8_t irk_hash[3];      
     
-    /* BT 5.2 ISO / isochronous channels */
-    uint8_t iso_channels;     /* number of ISO channels advertised */
-    uint8_t bis_handles[4];   /* BIS handle array, max 4 */
-    uint32_t iso_interval_us; /* ISO interval in microseconds, 0=unknown */
+    uint8_t iso_channels;     
+    uint8_t bis_handles[4];   
+    uint32_t iso_interval_us; 
 
-    /* Boolean flags grouped to minimize padding */
     bool ext_adv_seen;
     bool has_aux_ptr;
     bool has_adi;
@@ -266,7 +259,11 @@ typedef enum {
     DEAUTH_MODE_AUTH_FLOOD_ONLY = 3
 } deauth_mode_t;
 
-typedef struct {
+/* 
+ * CRITICAL: Packed to ensure stable binary layout for NVS persistence.
+ * Compiler padding or enum size changes would corrupt saved targets.
+ */
+typedef struct __attribute__((packed)) {
     uint8_t bssid[6];
     uint8_t client_mac[6];
     deauth_type_t type;
@@ -287,7 +284,7 @@ typedef struct {
 
 #define EAPOL_BUF_SIZE 256
 
-typedef struct {
+typedef struct __attribute__((packed)) {
     uint8_t ap_mac[6];
     uint8_t sta_mac[6];
     char ssid[33];
@@ -342,9 +339,9 @@ typedef struct {
     double longitude;
     double altitude;
     double speed_knots;
-    time_t timestamp; /* Use time_t for standard POSIX compatibility */
+    time_t timestamp; 
     uint8_t sat_count;
-    uint8_t fix_quality; /* 0=none, 1=GPS, 2=DGPS */
+    uint8_t fix_quality; 
     bool valid;
 } gps_fix_t;
 

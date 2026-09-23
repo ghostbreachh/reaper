@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -18,12 +19,8 @@ typedef enum {
 
 /* Runtime coexistence status snapshot. */
 typedef struct {
-    bool     wifi_has_radio;   /* WiFi currently transmitting/receiving */
-    bool     ble_has_radio;    /* BLE currently active */
-    bool     wifi_preempted;   /* WiFi was paused for BLE */
-    bool     ble_preempted;    /* BLE was paused for WiFi */
-    uint32_t wifi_preempt_count;
-    uint32_t ble_preempt_count;
+    bool wifi_has_radio;   /* WiFi currently transmitting/receiving */
+    bool ble_has_radio;    /* BLE currently active */
 } coex_status_t;
 
 /**
@@ -40,15 +37,18 @@ esp_err_t coex_init(void);
 esp_err_t coex_set_preference(coex_pref_t pref);
 
 /**
- * @brief Get current preference. */
+ * @brief Get current preference. 
+ */
 coex_pref_t coex_get_preference(void);
 
 /**
- * @brief Take a snapshot of current coexistence status. */
+ * @brief Take a snapshot of current coexistence status. 
+ */
 esp_err_t coex_get_status(coex_status_t *out_status);
 
 /**
- * @brief Return formatted JSON with preference + status. */
+ * @brief Return formatted JSON with preference + status. 
+ */
 esp_err_t coex_json(char *buf, size_t bufsz);
 
 /**
@@ -64,4 +64,5 @@ bool coex_ble_active(void);
 #ifdef __cplusplus
 }
 #endif
+
 #endif /* COEX_H */

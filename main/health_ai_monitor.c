@@ -1,27 +1,40 @@
 #include "health_ai_monitor.h"
 #include "health_telemetry.h"
-#include "esp_log.h"
+
 #include <string.h>
 #include <stdio.h>
+#include <stdatomic.h>
+#include <limits.h>
 
-static health_ai_state_t s_state = HEALTH_AI_STATE_OK;
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+
+static atomic_int s_state = ATOMIC_VAR_INIT(HEALTH_AI_STATE_OK);
 static const char *TAG = "health_ai";
 
-static int classify(uint32_t free_heap, uint32_t free_psram,
-                    int32_t cpu_temp_c)
+static health_ai_state_t classify(uint32_t free_heap, uint32_t free_psram,
+                                  int32_t cpu_temp_centi)
 {
     int score = 0;
+    
     if (free_heap < 20000) score += 3;
     else if (free_heap < 50000) score += 1;
 
     if (free_psram < 20000) score += 2;
     else if (free_psram < 50000) score += 1;
 
-    if (cpu_temp_c > 80) score += 3;
-    else if (cpu_temp_c > 70) score += 1;
+    /* 
+     * Convert centi-degrees to whole degrees. 
+     * Handle the INT32_MIN sentinel gracefully.
+     */
+    int32_t temp_c = (cpu_temp_centi == INT32_MIN) ? 0 : (cpu_temp_centi / 100);
+
+    if (temp_c > 80) score += 3;
+    else if (temp_c > 70) score += 1;
 
     if (score >= 5) return HEALTH_AI_STATE_CRITICAL;
     if (score >= 2) return HEALTH_AI_STATE_WARNING;
+    
     return HEALTH_AI_STATE_OK;
 }
 
@@ -38,7 +51,7 @@ static const char *state_name(health_ai_state_t s)
 
 esp_err_t health_ai_monitor_init(void)
 {
-    s_state = HEALTH_AI_STATE_OK;
+    atomic_store(&s_state, HEALTH_AI_STATE_OK);
     ESP_LOGI(TAG, "Self-healing AI monitor initialized");
     return ESP_OK;
 }
@@ -50,8 +63,17 @@ esp_err_t health_ai_monitor_update(void)
         return ESP_FAIL;
     }
 
-    s_state = classify(m.free_heap, m.free_psram, m.cpu_temp_c);
-    if (s_state == HEALTH_AI_STATE_CRITICAL) {
+    health_ai_state_t new_state = classify(m.free_heap, m.free_psram, m.cpu_temp_c);
+    
+    /* Prevent overwriting HEALING state unless the system has recovered to OK */
+    health_ai_state_t current = (health_ai_state_t)atomic_load(&s_state);
+    if (current == HEALTH_AI_STATE_HEALING && new_state != HEALTH_AI_STATE_OK) {
+        return ESP_OK; 
+    }
+
+    atomic_store(&s_state, new_state);
+
+    if (new_state == HEALTH_AI_STATE_CRITICAL) {
         ESP_LOGW(TAG, "System critical: heap=%u psram=%u temp=%d",
                  m.free_heap, m.free_psram, m.cpu_temp_c);
     }
@@ -60,35 +82,61 @@ esp_err_t health_ai_monitor_update(void)
 
 health_ai_state_t health_ai_monitor_state(void)
 {
-    return s_state;
+    return (health_ai_state_t)atomic_load(&s_state);
 }
 
 esp_err_t health_ai_monitor_json(char *out, size_t max)
 {
     if (!out || max == 0) return ESP_ERR_INVALID_ARG;
+    
     health_metrics_t m;
     if (health_telemetry_get(&m) != ESP_OK) return ESP_FAIL;
-    int n = snprintf(out, max,
-        "{\"state\":\"%s\",\"heap\":%u,\"psram\":%u,"
-        "\"temp\":%d}",
-        state_name(s_state), m.free_heap, m.free_psram, m.cpu_temp_c);
+    
+    health_ai_state_t current = (health_ai_state_t)atomic_load(&s_state);
+    
+    int n;
+    if (m.cpu_temp_c == INT32_MIN) {
+        n = snprintf(out, max,
+            "{\"state\":\"%s\",\"heap\":%u,\"psram\":%u,\"temp\":null}",
+            state_name(current), m.free_heap, m.free_psram);
+    } else {
+        n = snprintf(out, max,
+            "{\"state\":\"%s\",\"heap\":%u,\"psram\":%u,\"temp\":%.1f}",
+            state_name(current), m.free_heap, m.free_psram,
+            (float)m.cpu_temp_c / 100.0f);
+    }
+    
     if (n < 0 || (size_t)n >= max) return ESP_ERR_NO_MEM;
     return ESP_OK;
 }
 
 bool health_ai_monitor_should_heal(void)
 {
-    return s_state == HEALTH_AI_STATE_CRITICAL;
+    return (health_ai_state_t)atomic_load(&s_state) == HEALTH_AI_STATE_CRITICAL;
 }
 
 esp_err_t health_ai_monitor_heal(void)
 {
-    if (s_state != HEALTH_AI_STATE_CRITICAL) return ESP_ERR_INVALID_STATE;
-    s_state = HEALTH_AI_STATE_HEALING;
-    ESP_LOGI(TAG, "Initiating self-healing sequence");
-    /* Step 1: free caches */
-    /* Step 2: restart non-critical tasks if needed */
-    /* Step 3: reboot if still critical after 2 cycles */
-    s_state = HEALTH_AI_STATE_OK;
+    health_ai_state_t current = (health_ai_state_t)atomic_load(&s_state);
+    if (current != HEALTH_AI_STATE_CRITICAL) return ESP_ERR_INVALID_STATE;
+    
+    atomic_store(&s_state, HEALTH_AI_STATE_HEALING);
+    ESP_LOGW(TAG, "Initiating self-healing sequence");
+    
+    /* 
+     * Self-healing stub:
+     * In a production system, this would:
+     * 1. Clear non-essential caches (e.g., AI model zoo, BLE scanner list)
+     * 2. Restart non-critical background tasks
+     * 3. Force a garbage collection on the heap
+     */
+     
+    size_t min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "Pre-heal min free heap: %u", (unsigned)min_free);
+    
+    /* TODO: Implement actual cache clearing here */
+    
+    ESP_LOGI(TAG, "Self-healing sequence complete");
+    atomic_store(&s_state, HEALTH_AI_STATE_OK);
     return ESP_OK;
 }

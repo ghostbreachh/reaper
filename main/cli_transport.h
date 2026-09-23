@@ -6,17 +6,15 @@
 #include <stddef.h>
 #include "esp_err.h"
 #include "common_types.h"
-#include "port_detect.h" /* Needed for port_transport_t */
+#include "port_detect.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Maximum command line length accepted from any transport.
 #define CLI_LINE_MAX 192
+#define CLI_MAX_ARGS 16
 
-// Transport interface. Implementations provide the same behaviour over
-// UART0 or CDC-ACM so the command parser sees an identical stream.
 typedef struct {
     esp_err_t (*init)(void);
     esp_err_t (*deinit)(void);
@@ -26,13 +24,8 @@ typedef struct {
     int       (*printf)(const char *fmt, ...);
 } cli_transport_t;
 
-// Return the active transport selected at boot.
 const cli_transport_t *cli_transport_get(void);
-
-// Re-read boot detection and switch active transport at runtime.
 esp_err_t cli_transport_switch(port_transport_t new_transport);
-
-// Start the CLI task
 esp_err_t cli_start(void);
 
 #ifdef __cplusplus
