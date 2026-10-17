@@ -14,8 +14,8 @@ extern "C" {
 
 typedef struct {
     uint8_t mac[6];
-    uint8_t type;
-    uint8_t battery;
+    uint8_t type;      /* 1 = Samsung SmartTag, 2 = Tile */
+    uint8_t battery;   /* 0-100, 0xFF if unknown */
     bool valid;
 } smarttag_device_t;
 
@@ -28,4 +28,5 @@ void smarttag_clear(void);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* BLE_SMARTTAG_H */

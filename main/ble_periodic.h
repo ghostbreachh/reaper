@@ -13,7 +13,7 @@ extern "C" {
 #endif
 
 /* Initialize periodic advertising subsystem.
- * Must be called after nimble_port_init().
+ * Must be called after nimble_port_init() and before any other function.
  * Returns ESP_OK on success. */
 esp_err_t ble_periodic_init(void);
 
@@ -37,4 +37,5 @@ bool ble_periodic_update(const uint8_t *mac, uint8_t adv_mode,
 #ifdef __cplusplus
 }
 #endif
+
 #endif /* BLE_PERIODIC_H */

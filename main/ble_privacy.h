@@ -13,6 +13,9 @@ extern "C" {
 /* Initialize BLE privacy subsystem. */
 esp_err_t ble_privacy_init(void);
 
+/* Count how many discovered BLE devices are using Resolvable Private Addresses. */
+uint16_t ble_scanner_count_rpas(void);
+
 /* Parse BLE address to detect Resolvable Private Address (RPA).
  * addr_type: 0=public, 1=random, 2=public identity, 3=random identity
  * mac: 6-byte address

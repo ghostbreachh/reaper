@@ -1,6 +1,7 @@
 #include <stdatomic.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <ctype.h>
 #include <inttypes.h>
 
@@ -225,7 +226,14 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             xSemaphoreGive(g_ble_lock);
         }
 
-        /* 2. Notify external modules OUTSIDE the lock to prevent deadlocks */
+        /* 
+         * 2. Notify external modules OUTSIDE the lock to prevent deadlocks.
+         * 
+         * WARNING: event->disc.data is a pointer to NimBLE's internal buffer.
+         * It is ONLY valid for the duration of this callback.
+         * External modules MUST process it synchronously or copy the data.
+         * Passing this pointer to another task or queue will cause a Use-After-Free crash.
+         */
         ai_ble_profile_t profile;
         ai_ble_profiler_classify(dev.mac, event->disc.data, event->disc.length_data, &profile);
         reaction_rules_check_ble(dev.mac);
@@ -381,63 +389,74 @@ void ble_scanner_fprint(FILE *out)
 {
     if (out == NULL || g_ble_lock == NULL) return;
 
+    /* CRITICAL FIX: Copy list to heap to avoid holding lock during slow I/O */
+    ble_info_t *local_list = malloc(sizeof(ble_info_t) * MAX_DISCOVERED_BLE);
+    if (local_list == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for BLE report");
+        return;
+    }
+
     xSemaphoreTake(g_ble_lock, portMAX_DELAY);
+    uint16_t count = g_ble_count;
+    if (count > MAX_DISCOVERED_BLE) count = MAX_DISCOVERED_BLE;
+    memcpy(local_list, g_ble_list, sizeof(ble_info_t) * count);
+    xSemaphoreGive(g_ble_lock);
 
     fprintf(out, "\n");
     fprintf(out, "=========================================================================\n");
-    fprintf(out, "                     DISCOVERED BLE DEVICES (%d)\n", g_ble_count);
+    fprintf(out, "                     DISCOVERED BLE DEVICES (%d)\n", count);
     fprintf(out, "=========================================================================\n");
     fprintf(out, " #  | BLE MAC           | TYPE    | RSSI | PKTS     | EXT ADV     | PA SYNC    | PHY       | ISO        | VENDOR      | DEVICE NAME\n");
     fprintf(out, "----+-------------------+---------+------+----------+-------------+------------+-----------+------------+-------------+-----------\n");
 
-    for (int i = 0; i < g_ble_count; i++) {
+    for (int i = 0; i < count; i++) {
         char extadv[12] = "-";
-        if (g_ble_list[i].ext_adv_seen) {
-            if (g_ble_list[i].has_aux_ptr) snprintf(extadv, sizeof(extadv), "aux");
-            else if (g_ble_list[i].has_adi) snprintf(extadv, sizeof(extadv), "adi");
+        if (local_list[i].ext_adv_seen) {
+            if (local_list[i].has_aux_ptr) snprintf(extadv, sizeof(extadv), "aux");
+            else if (local_list[i].has_adi) snprintf(extadv, sizeof(extadv), "adi");
             else snprintf(extadv, sizeof(extadv), "ext");
         }
         bool synced = false;
-        if (g_ble_list[i].ext_adv_seen && g_ble_lock != NULL) {
+        if (local_list[i].ext_adv_seen) {
             synced = ble_periodic_is_synced(
-                (g_ble_list[i].adv_mode > 0) ? 1 : 0,
-                g_ble_list[i].mac
+                (local_list[i].adv_mode > 0) ? 1 : 0,
+                local_list[i].mac
             );
         }
         char pa_col[12] = "-";
-        if (g_ble_list[i].periodic_adv_seen) {
+        if (local_list[i].periodic_adv_seen) {
             if (synced) snprintf(pa_col, sizeof(pa_col), "SYNC");
-            else if (g_ble_list[i].has_sync_info) snprintf(pa_col, sizeof(pa_col), "PA");
+            else if (local_list[i].has_sync_info) snprintf(pa_col, sizeof(pa_col), "PA");
             else snprintf(pa_col, sizeof(pa_col), "XFR");
         }
         char phy_col[12] = "-";
-        if (g_ble_list[i].phy_coded_s8) snprintf(phy_col, sizeof(phy_col), "S8");
-        else if (g_ble_list[i].phy_coded) snprintf(phy_col, sizeof(phy_col), "S2");
-        else if (g_ble_list[i].phy_2m) snprintf(phy_col, sizeof(phy_col), "2M");
-        else if (g_ble_list[i].phy_1m) snprintf(phy_col, sizeof(phy_col), "1M");
-        else if (g_ble_list[i].phy_coded_supported) snprintf(phy_col, sizeof(phy_col), "coded");
+        if (local_list[i].phy_coded_s8) snprintf(phy_col, sizeof(phy_col), "S8");
+        else if (local_list[i].phy_coded) snprintf(phy_col, sizeof(phy_col), "S2");
+        else if (local_list[i].phy_2m) snprintf(phy_col, sizeof(phy_col), "2M");
+        else if (local_list[i].phy_1m) snprintf(phy_col, sizeof(phy_col), "1M");
+        else if (local_list[i].phy_coded_supported) snprintf(phy_col, sizeof(phy_col), "coded");
         char iso_col[12] = "-";
-        if (g_ble_list[i].iso_seen) {
-            if (g_ble_list[i].has_big_info) snprintf(iso_col, sizeof(iso_col), "BIG");
+        if (local_list[i].iso_seen) {
+            if (local_list[i].has_big_info) snprintf(iso_col, sizeof(iso_col), "BIG");
             else snprintf(iso_col, sizeof(iso_col), "ISO");
         }
         fprintf(
             out,
             "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-7s | %-4d | %-8" PRIu32 " | %-11s | %-11s | %-9s | %-10s | %-11s | %s\n",
             i + 1,
-            g_ble_list[i].mac[5], g_ble_list[i].mac[4], g_ble_list[i].mac[3],
-            g_ble_list[i].mac[2], g_ble_list[i].mac[1], g_ble_list[i].mac[0],
-            (g_ble_list[i].addr_type == 0) ? "Public" : "Random",
-            g_ble_list[i].rssi,
-            g_ble_list[i].pkt_count,
+            local_list[i].mac[5], local_list[i].mac[4], local_list[i].mac[3],
+            local_list[i].mac[2], local_list[i].mac[1], local_list[i].mac[0],
+            (local_list[i].addr_type == 0) ? "Public" : "Random",
+            local_list[i].rssi,
+            local_list[i].pkt_count,
             extadv, pa_col, phy_col, iso_col,
-            get_vendor_name(g_ble_list[i].mfg_id),
-            g_ble_list[i].name
+            get_vendor_name(local_list[i].mfg_id),
+            local_list[i].name
         );
     }
 
     fprintf(out, "=========================================================================\n");
-    xSemaphoreGive(g_ble_lock);
+    free(local_list);
 }
 
 void ble_scanner_print_results(void) { ble_scanner_fprint(stdout); }
@@ -460,7 +479,15 @@ void ble_tracker_print(void)
 {
     if (g_ble_lock == NULL) return;
 
+    /* CRITICAL FIX: Copy list to heap to avoid holding lock during slow I/O */
+    ble_info_t *local_list = malloc(sizeof(ble_info_t) * MAX_DISCOVERED_BLE);
+    if (local_list == NULL) return;
+
     xSemaphoreTake(g_ble_lock, portMAX_DELAY);
+    uint16_t count = g_ble_count;
+    if (count > MAX_DISCOVERED_BLE) count = MAX_DISCOVERED_BLE;
+    memcpy(local_list, g_ble_list, sizeof(ble_info_t) * count);
+    xSemaphoreGive(g_ble_lock);
 
     printf("\n");
     printf("=========================================================================\n");
@@ -470,17 +497,17 @@ void ble_tracker_print(void)
     printf("----+-------------------+-------+-------------+-------------------------\n");
 
     int shown = 0;
-    for (int i = 0; i < g_ble_count; i++) {
-        if (g_ble_list[i].tracker_score >= 2) {
+    for (int i = 0; i < count; i++) {
+        if (local_list[i].tracker_score >= 2) {
             shown++;
             printf(
                 "%-2d | %02X:%02X:%02X:%02X:%02X:%02X | %-5d | %-11s | %s\n",
                 shown,
-                g_ble_list[i].mac[5], g_ble_list[i].mac[4], g_ble_list[i].mac[3],
-                g_ble_list[i].mac[2], g_ble_list[i].mac[1], g_ble_list[i].mac[0],
-                g_ble_list[i].tracker_score,
-                get_vendor_name(g_ble_list[i].mfg_id),
-                g_ble_list[i].name
+                local_list[i].mac[5], local_list[i].mac[4], local_list[i].mac[3],
+                local_list[i].mac[2], local_list[i].mac[1], local_list[i].mac[0],
+                local_list[i].tracker_score,
+                get_vendor_name(local_list[i].mfg_id),
+                local_list[i].name
             );
         }
     }
@@ -492,14 +519,21 @@ void ble_tracker_print(void)
     printf("=========================================================================\n");
     printf("Note: BLE MAC randomization causes many false positives.\n");
 
-    xSemaphoreGive(g_ble_lock);
+    free(local_list);
 }
 
 /* -------------------------------------------------------------------------
  *  Public API: Getters
  * ----------------------------------------------------------------------- */
 
-uint16_t ble_scanner_get_count(void) { return g_ble_count; }
+uint16_t ble_scanner_get_count(void) 
+{ 
+    if (g_ble_lock == NULL) return 0;
+    xSemaphoreTake(g_ble_lock, portMAX_DELAY);
+    uint16_t c = g_ble_count;
+    xSemaphoreGive(g_ble_lock);
+    return c; 
+}
 
 bool ble_scanner_get_ext_adv(const uint8_t *mac, bool *out_ext_adv, bool *out_aux_ptr,
                               bool *out_adi, uint8_t *out_adv_mode, bool *out_scan_rsp, uint8_t *out_tx_power)

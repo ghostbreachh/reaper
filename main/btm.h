@@ -15,7 +15,7 @@ extern "C" {
 typedef struct {
     uint8_t src_bssid[6];
     uint8_t dst_bssid[6];
-    uint8_t disassoc_timer;
+    uint16_t disassoc_timer;   /* Changed to uint16_t (2-byte field) */
     bool valid;
 } btm_request_t;
 
@@ -27,4 +27,5 @@ void btm_clear(void);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* BTM_H */
