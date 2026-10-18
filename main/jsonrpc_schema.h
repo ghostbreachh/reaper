@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "esp_err.h"
 #include "jsonrpc.h"
 
 #ifdef __cplusplus
@@ -28,19 +29,8 @@ extern "C" {
  *    sufficient and safer for embedded.
  * ------------------------------------------------------------------------- */
 
-/* Async event types for notifications pushed to companion app. */
-typedef enum {
-    JSONRPC_EVENT_WIFI_AP = 0,
-    JSONRPC_EVENT_WIFI_CLIENT,
-    JSONRPC_EVENT_BLE_DEV,
-    JSONRPC_EVENT_HANDSHAKE,
-    JSONRPC_EVENT_CRED,
-    JSONRPC_EVENT_HEALTH,
-    JSONRPC_EVENT_PCAP,
-    JSONRPC_EVENT_DEAUTH,
-    JSONRPC_EVENT_DIAG,
-    JSONRPC_EVENT_OTA_PROGRESS,
-} jsonrpc_event_type_t;
+/* Maximum length of an async event JSON payload (including NUL). */
+#define JSONRPC_EVENT_MAX_LEN 1024
 
 /* Method group identifiers. */
 typedef enum {
@@ -59,7 +49,8 @@ typedef enum {
  */
 uint16_t jsonrpc_schema_v1_build(jsonrpc_method_entry_t *table, uint16_t cap);
 
-/* Post an async event notification to the host. Thread-safe. */
+/* Post an async event notification to the host. Thread-safe.
+ * event_json must not exceed JSONRPC_EVENT_MAX_LEN bytes. */
 esp_err_t jsonrpc_schema_event_post(jsonrpc_event_type_t type,
                                     const char *event_json);
 

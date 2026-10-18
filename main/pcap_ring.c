@@ -91,6 +91,8 @@ uint32_t pcap_ring_frame_crc32(const uint8_t *buf, size_t len)
     return crc ^ 0xFFFFFFFFu;
 }
 
+static void pcap_ring_read_bytes_at(size_t offset, uint8_t *dst, size_t len);
+
 static uint32_t crc32_ring(size_t offset, size_t len)
 {
     uint8_t chunk[PCAP_EXPORT_CHUNK_SIZE];

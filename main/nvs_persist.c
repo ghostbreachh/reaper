@@ -19,7 +19,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-static const char *TAG = "nvs";
 static const char *NS = "reaper";
 
 static SemaphoreHandle_t g_nvs_lock = NULL;
@@ -67,7 +66,7 @@ esp_err_t persist_set_u32(const char *key, uint32_t value)
     nvs_handle_t h = open_handle(true);
     if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_FAIL; }
     
-    esp_err_t ret = persist_set_u32(h, key, value);
+    esp_err_t ret = nvs_set_u32(h, key, value);
     if (ret == ESP_OK) ret = nvs_commit(h);
     nvs_close(h);
     
@@ -84,7 +83,7 @@ esp_err_t persist_get_u32(const char *key, uint32_t *out, uint32_t def)
     nvs_handle_t h = open_handle(false);
     if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_ERR_NOT_FOUND; }
     
-    esp_err_t ret = persist_get_u32(h, key, out);
+    esp_err_t ret = nvs_get_u32(h, key, out);
     nvs_close(h);
     
     xSemaphoreGive(g_nvs_lock);
@@ -99,7 +98,7 @@ esp_err_t persist_set_u8(const char *key, uint8_t value)
     nvs_handle_t h = open_handle(true);
     if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_FAIL; }
     
-    esp_err_t ret = persist_set_u8(h, key, value);
+    esp_err_t ret = nvs_set_u8(h, key, value);
     if (ret == ESP_OK) ret = nvs_commit(h);
     nvs_close(h);
     
@@ -116,7 +115,7 @@ esp_err_t persist_get_u8(const char *key, uint8_t *out, uint8_t def)
     nvs_handle_t h = open_handle(false);
     if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_ERR_NOT_FOUND; }
     
-    esp_err_t ret = persist_get_u8(h, key, out);
+    esp_err_t ret = nvs_get_u8(h, key, out);
     nvs_close(h);
     
     xSemaphoreGive(g_nvs_lock);
@@ -145,7 +144,7 @@ esp_err_t persist_set_str(const char *key, const char *value)
     nvs_handle_t h = open_handle(true);
     if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_FAIL; }
     
-    esp_err_t ret = persist_set_str(h, key, value);
+    esp_err_t ret = nvs_set_str(h, key, value);
     if (ret == ESP_OK) ret = nvs_commit(h);
     nvs_close(h);
     
@@ -167,7 +166,7 @@ esp_err_t persist_get_str(const char *key, char *out, size_t out_len, const char
     }
     
     size_t len = out_len;
-    esp_err_t ret = persist_get_str(h, key, out, &len);
+    esp_err_t ret = nvs_get_str(h, key, out, &len);
     nvs_close(h);
     
     if (ret != ESP_OK && def) {
@@ -195,7 +194,7 @@ esp_err_t persist_save_targets(const deauth_target_t *targets, size_t count)
         nvs_erase_key(h, key); /* Ignore errors if key doesn't exist */
     }
 
-    esp_err_t ret = persist_set_u32(h, "tgts_n", (uint32_t)count);
+    esp_err_t ret = nvs_set_u32(h, "tgts_n", (uint32_t)count);
     if (ret != ESP_OK) { nvs_close(h); xSemaphoreGive(g_nvs_lock); return ret; }
 
     for (size_t i = 0; i < count; i++) {
@@ -220,7 +219,7 @@ esp_err_t persist_load_targets(deauth_target_t *targets, size_t max, size_t *cou
     if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_ERR_NOT_FOUND; }
 
     uint32_t n = 0;
-    esp_err_t ret = persist_get_u32(h, "tgts_n", &n);
+    esp_err_t ret = nvs_get_u32(h, "tgts_n", &n);
     if (ret != ESP_OK || n == 0) { nvs_close(h); xSemaphoreGive(g_nvs_lock); return ESP_OK; }
 
     if (n > MAX_SAVED_TARGETS) n = MAX_SAVED_TARGETS;
@@ -297,7 +296,7 @@ esp_err_t persist_erase_all(void)
     nvs_handle_t h = open_handle(true);
     if (!h) { xSemaphoreGive(g_nvs_lock); return ESP_FAIL; }
     
-    esp_err_t ret = persist_erase_all(h);
+    esp_err_t ret = nvs_erase_all(h);
     if (ret == ESP_OK) ret = nvs_commit(h);
     
     nvs_close(h);

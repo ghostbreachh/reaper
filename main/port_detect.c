@@ -12,8 +12,12 @@
 #include "esp_log.h"
 #include "esp_system.h"
 
+#if __has_include("soc/usb_serial_jtag_reg.h")
 #include "soc/usb_serial_jtag_reg.h"
+#endif
+#if __has_include("driver/usb_serial_jtag.h")
 #include "driver/usb_serial_jtag.h"
+#endif
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -173,4 +177,9 @@ void port_print_banner(const port_detect_result_t *res)
     }
 
     printf("  │\n");
+}
+
+port_transport_t port_detect_get_active(void)
+{
+    return g_boot_port.active;
 }

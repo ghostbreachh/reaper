@@ -50,6 +50,12 @@ static atomic_bool g_wifi_init_done = ATOMIC_VAR_INIT(false);
 static QueueHandle_t g_wifi_pkt_queue = NULL;
 static SemaphoreHandle_t g_wifi_lock = NULL;
 static SemaphoreHandle_t g_pcap_mutex = NULL;
+static esp_timer_handle_t g_sniff_timer = NULL;
+
+static void sniff_timer_cb(void *arg) {
+    (void)arg;
+    wifi_sniffer_stop();
+}
 
 static volatile uint32_t g_wifi_alloc_drop = 0;
 static volatile uint32_t g_wifi_queue_drop = 0;
@@ -180,7 +186,7 @@ static bool pmf_parse_rsn(const uint8_t *ies, size_t len, ap_features_t *feat) {
     return false;
 }
 
-static bool wifi_mbssid_parse(const uint8_t *ies, size_t len, ap_features_t *feat) {
+static bool sniffer_mbssid_parse(const uint8_t *ies, size_t len, ap_features_t *feat) {
     if (!ies || len == 0 || !feat) return false;
     size_t pos = 0;
     while (pos + 2 <= len) {
@@ -567,7 +573,7 @@ static void parse_wifi_packet(const wifi_pkt_msg_t *msg) {
             pmf_parse_rsn(data + 24, len - 24, &feat);
             feat.has_rrm = wifi_rrm_parse_beacon(data + 24, len - 24, feat.nbrs, &feat.nbr_count);
             feat.has_btm = wifi_rrm_parse_btm(data + 24, len - 24);
-            wifi_mbssid_parse(data + 24, len - 24, &feat);
+            sniffer_mbssid_parse(data + 24, len - 24, &feat);
             /* TODO: Add wifi_he_parse and wifi_country_parse here if defined in wifi_rrm.h */
             
             add_ap_locked(hdr->addr3, ssid, msg->rssi, msg->channel, &feat);
@@ -628,7 +634,7 @@ static void wifi_pkt_worker_task(void *arg) {
                     pcap_write(msg.payload, msg.len, &msg.tv);
                     export_write_packet(msg.payload, msg.len, msg.channel, msg.rssi, msg.tv.tv_sec * 1000000ULL + msg.tv.tv_usec);
                     if (ai_train_get_mode() != AI_TRAIN_MODE_OFF) {
-                        ai_train_label_wifi(msg.payload, msg.len, msg.channel, msg.rssi, msg.tv.tv_sec * 1000000ULL + msg.tv.tv_usec);
+                        ai_train_label_wifi(NULL, msg.payload, msg.len, msg.channel, msg.rssi, msg.tv.tv_sec * 1000000ULL + msg.tv.tv_usec);
                     }
                 }
                 if (pcap_ring_is_active()) pcap_ring_store(msg.payload, msg.len, &msg.tv);
@@ -688,6 +694,10 @@ static esp_err_t wifi_sniffer_start_internal(uint32_t duration_sec, bool enable_
         return ret;
     }
     led_set_state(LED_STATE_SCANNING);
+    if (duration_sec > 0 && g_sniff_timer != NULL) {
+        esp_timer_stop(g_sniff_timer);
+        esp_timer_start_once(g_sniff_timer, (uint64_t)duration_sec * 1000000ULL);
+    }
     if (channel_hopper_init() == ESP_OK) {
         ch_hop_config_t cfg = { .mode = CH_HOP_MODE_SEQUENTIAL, .dwell_ms = 100, .channel_mask = 0xFF };
         channel_hopper_start(&cfg);
@@ -717,6 +727,15 @@ esp_err_t wifi_sniffer_init(void) {
     esp_wifi_set_promiscuous_filter(&filter);
     esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb);
 
+    if (g_sniff_timer == NULL) {
+        esp_timer_create_args_t targs = {
+            .callback = sniff_timer_cb,
+            .arg = NULL,
+            .name = "wifi_sniff_tmr"
+        };
+        esp_timer_create(&targs, &g_sniff_timer);
+    }
+
     atomic_store(&g_wifi_init_done, true);
     ESP_LOGI(TAG, "Wi-Fi sniffer initialized");
     return ESP_OK;
@@ -728,6 +747,7 @@ esp_err_t wifi_sniffer_start_pcap(uint32_t duration_sec) { return wifi_sniffer_s
 void wifi_sniffer_stop(void) {
     if (!atomic_load(&g_wifi_sniffer_active)) return;
     atomic_store(&g_wifi_sniffer_active, false);
+    if (g_sniff_timer != NULL) esp_timer_stop(g_sniff_timer);
     esp_wifi_set_promiscuous(false);
     wifi_pkt_msg_t msg;
     while (xQueueReceive(g_wifi_pkt_queue, &msg, pdMS_TO_TICKS(5)) == pdTRUE) {

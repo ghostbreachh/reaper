@@ -185,6 +185,7 @@ esp_err_t wardrive_stop(void)
     wardrive_mode_t prev = g_mode;
     g_mode = WARDRIVE_MODE_OFF;
     
+    (void)prev;
     ESP_LOGI(TAG, "Wardrive stopped: mode=%s wifi=%"PRIu32" ble=%"PRIu32" geo=%"PRIu32" no_geo=%"PRIu32,
              mode_to_str(prev), g_wifi_points, g_ble_points, g_geo_points, g_no_geo_points);
              

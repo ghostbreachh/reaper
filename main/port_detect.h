@@ -10,6 +10,7 @@ extern "C" {
 
 esp_err_t boot_port_detect(port_detect_result_t *out_result);
 const char *port_transport_name(port_transport_t t);
+port_transport_t port_detect_get_active(void);
 void port_print_banner(const port_detect_result_t *res);
 
 /* Global cache of boot-time detection. Other modules may read this

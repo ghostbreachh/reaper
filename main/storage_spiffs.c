@@ -97,7 +97,7 @@ esp_err_t storage_spiffs_format(void)
         esp_vfs_spiffs_unregister(NULL);
     }
 
-    esp_err_t ret = esp_vfs_spiffs_format(NULL);
+    esp_err_t ret = esp_spiffs_format(NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Format failed: %s", esp_err_to_name(ret));
         /* Attempt to remount even if format failed, to restore state */
@@ -231,7 +231,7 @@ esp_err_t storage_spiffs_list_wordlists(char ***names, size_t *count)
 
     size_t valid = 0;
     for (int i = 0; i < n; i++) {
-        char full[128];
+        char full[300];
         snprintf(full, sizeof(full), "%s/%s", BASE_PATH, entries[i]->d_name);
         struct stat st;
         if (stat(full, &st) == 0 && S_ISREG(st.st_mode)) {
@@ -265,5 +265,49 @@ esp_err_t storage_spiffs_usage(uint64_t *total, uint64_t *used)
     if (ret != ESP_OK) return ret;
     *total = t;
     *used = u;
+    return ESP_OK;
+}
+
+esp_err_t storage_spiffs_list_wordlists_json(char *buf, size_t bufsz)
+{
+    if (!buf || bufsz == 0) return ESP_ERR_INVALID_ARG;
+    char **names = NULL;
+    size_t count = 0;
+    esp_err_t rc = storage_spiffs_list_wordlists(&names, &count);
+    if (rc != ESP_OK) return rc;
+
+    size_t off = 0;
+    int n = snprintf(buf + off, bufsz - off, "[");
+    if (n < 0 || (size_t)n >= bufsz - off) {
+        storage_spiffs_free_list(names, count);
+        return ESP_ERR_NO_MEM;
+    }
+    off += (size_t)n;
+
+    for (size_t i = 0; i < count; i++) {
+        n = snprintf(buf + off, bufsz - off, "%s\"%s\"", (i > 0) ? "," : "", names[i] ? names[i] : "");
+        if (n < 0 || (size_t)n >= bufsz - off) {
+            storage_spiffs_free_list(names, count);
+            return ESP_ERR_NO_MEM;
+        }
+        off += (size_t)n;
+    }
+    storage_spiffs_free_list(names, count);
+
+    n = snprintf(buf + off, bufsz - off, "]");
+    if (n < 0 || (size_t)n >= bufsz - off) return ESP_ERR_NO_MEM;
+    return ESP_OK;
+}
+
+esp_err_t storage_spiffs_load_wordlist_meta(const char *name)
+{
+    if (!path_is_safe(name)) return ESP_ERR_INVALID_ARG;
+    if (!storage_spiffs_is_ready()) return ESP_ERR_INVALID_STATE;
+    char full[128];
+    build_full_path(full, sizeof(full), name);
+    struct stat st;
+    if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) {
+        return ESP_ERR_NOT_FOUND;
+    }
     return ESP_OK;
 }

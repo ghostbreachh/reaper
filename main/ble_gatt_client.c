@@ -3,18 +3,57 @@
 #include <stdbool.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "ble_scanner.h"
+#if __has_include("host/ble_gap.h")
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
+#else
+/* Fallback definitions when NimBLE is not enabled in sdkconfig */
+#define BLE_GAP_EVENT_CONNECT       10
+#define BLE_GAP_EVENT_DISCONNECT    11
+#define BLE_GAP_EVENT_MTU           12
+#define BLE_OWN_ADDR_RANDOM         1
+#define BLE_ERR_REM_USER_CONN_TERM  0x13
+
+typedef struct { uint8_t type; uint8_t val[6]; } ble_addr_t;
+struct ble_gap_event {
+    uint8_t type;
+    struct { int status; uint16_t conn_handle; } connect;
+    struct { int reason; } disconnect;
+    struct { uint16_t value; } mtu;
+};
+struct ble_gap_conn_params {
+    uint16_t scan_interval;
+    uint16_t scan_window;
+    uint16_t itvl_min;
+    uint16_t itvl_max;
+    uint16_t latency;
+    uint16_t supervision_timeout;
+    uint16_t min_ce_len;
+    uint16_t max_ce_len;
+};
+static inline int ble_gap_connect(uint8_t own_addr_type, const ble_addr_t *peer_addr, int32_t duration_ms, const struct ble_gap_conn_params *params, int (*cb)(struct ble_gap_event *, void *), void *cb_arg) {
+    (void)own_addr_type; (void)peer_addr; (void)duration_ms; (void)params; (void)cb; (void)cb_arg; return -1;
+}
+static inline int ble_gap_terminate(uint16_t conn_handle, uint8_t hci_reason) {
+    (void)conn_handle; (void)hci_reason; return -1;
+}
+static inline int ble_gattc_disc_all_svcs(uint16_t conn_handle, void *cb, void *cb_arg) {
+    (void)conn_handle; (void)cb; (void)cb_arg; return -1;
+}
+static inline int ble_gattc_disc_all_chrs(uint16_t conn_handle, uint16_t start_handle, uint16_t end_handle, void *cb, void *cb_arg) {
+    (void)conn_handle; (void)start_handle; (void)end_handle; (void)cb; (void)cb_arg; return -1;
+}
+static inline int ble_gattc_read(uint16_t conn_handle, uint16_t attr_handle, void *cb, void *cb_arg) {
+    (void)conn_handle; (void)attr_handle; (void)cb; (void)cb_arg; return -1;
+}
+#endif
 
 /* nimble GAP event callback typedef */
 typedef int (*ble_gap_event_fn_t)(struct ble_gap_event *event, void *arg);
 
-/* Discovery callback typedefs */
-typedef void (*ble_gattc_disc_svc_fn)(ble_gattc_conn_t conn_handle,
-                                      const ble_gattc_svc_t *svc, void *arg);
-typedef void (*ble_gattc_disc_char_fn)(ble_gattc_conn_t conn_handle,
-                                       const ble_gattc_char_t *chr, void *arg);
 
 static const char *TAG = "ble_gattc";
 
@@ -78,20 +117,6 @@ static gattc_conn_state_t *gattc_find_by_handle(ble_gattc_conn_t conn)
     }
     xSemaphoreGive(g_gattc_lock);
     return NULL;
-}
-
-static void gattc_set_state(ble_gattc_conn_t conn, ble_gattc_state_t new_state)
-{
-    if (g_gattc_lock == NULL) return;
-    xSemaphoreTake(g_gattc_lock, portMAX_DELAY);
-    for (int i = 0; i < MAX_GATTC_CONNECTIONS; i++) {
-        if (g_conns[i].in_use && g_conns[i].conn_handle == conn) {
-            g_conns[i].state = new_state;
-            xSemaphoreGive(g_gattc_lock);
-            return;
-        }
-    }
-    xSemaphoreGive(g_gattc_lock);
 }
 
 static void gattc_free(ble_gattc_conn_t conn)
@@ -166,7 +191,7 @@ esp_err_t ble_gattc_connect(const uint8_t *mac, uint32_t timeout_ms,
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!g_ble_init_done) {
+    if (!ble_scanner_is_initialized()) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -273,7 +298,7 @@ esp_err_t ble_gattc_discover_services(ble_gattc_conn_t conn_handle,
     /* Discover all primary services. Callback would populate svcs array;
      * here we start discovery and log intent because full callback storage
      * requires per-service context not yet wired into CLI/JSON-RPC. */
-    int rc = ble_gattc_disc_all_svcs(conn_handle, NULL);
+    int rc = ble_gattc_disc_all_svcs(conn_handle, NULL, NULL);
     if (rc != 0) {
         st->state = BLE_GATTC_STATE_CONNECTED;
         ESP_LOGE(TAG, "ble_gattc_disc_all_svcs failed: %d", rc);
@@ -306,7 +331,7 @@ esp_err_t ble_gattc_discover_chars(ble_gattc_conn_t conn_handle,
     st->char_cb = cb;
     st->char_cb_arg = cb_arg;
 
-    int rc = ble_gattc_disc_chars(
+    int rc = ble_gattc_disc_all_chrs(
         conn_handle,
         start_handle,
         end_handle,
@@ -349,10 +374,8 @@ esp_err_t ble_gattc_read_char(ble_gattc_conn_t conn_handle,
     int rc = ble_gattc_read(
         conn_handle,
         char_handle,
-        buf,
-        max_len,
-        &actual_len,
-        BLE_GRP_ATTRS
+        NULL,
+        NULL
     );
 
     if (rc != 0) {

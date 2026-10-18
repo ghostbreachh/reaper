@@ -13,12 +13,14 @@
 #include "freertos/task.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#if __has_include("esp_cpu.h")
 #include "esp_cpu.h"
+#endif
 #include "esp_timer.h"
 #include "esp_log.h"
 
 /* CPU temp sensor requires esp_driver_tsens; gracefully disable if missing. */
-#if __has_include("driver/temperature_sensor.h")
+#if __has_include("driver/temperature_sensor.h") && defined(CONFIG_SOC_TEMP_SENSOR_SUPPORTED) && CONFIG_SOC_TEMP_SENSOR_SUPPORTED
 #include "driver/temperature_sensor.h"
 #define HEALTH_HAS_TSENS 1
 #else
@@ -137,13 +139,13 @@ esp_err_t health_telemetry_json_export(char *buf, size_t bufsz)
         n = snprintf(buf, bufsz,
             "{\"uptime_s\":%u,\"free_heap\":%u,\"free_psram\":%u,"
             "\"cpu_temp_c\":null,\"min_free_heap\":%u}",
-            m.uptime_s, m.free_heap, m.free_psram, m.min_free_heap);
+            (unsigned)m.uptime_s, (unsigned)m.free_heap, (unsigned)m.free_psram, (unsigned)m.min_free_heap);
     } else {
         n = snprintf(buf, bufsz,
             "{\"uptime_s\":%u,\"free_heap\":%u,\"free_psram\":%u,"
             "\"cpu_temp_c\":%.2f,\"min_free_heap\":%u}",
-            m.uptime_s, m.free_heap, m.free_psram,
-            (float)m.cpu_temp_c / 100.0f, m.min_free_heap);
+            (unsigned)m.uptime_s, (unsigned)m.free_heap, (unsigned)m.free_psram,
+            (float)m.cpu_temp_c / 100.0f, (unsigned)m.min_free_heap);
     }
 
     if (n < 0 || (size_t)n >= bufsz) {

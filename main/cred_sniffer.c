@@ -314,7 +314,7 @@ void creds_feed_packet(const uint8_t *data, size_t len)
     if (ip[9] != 6) return;                 /* TCP only */
 
     uint8_t ihl = (ip[0] & 0x0F) * 4;
-    if (ihl < 20 || ip_len < ihl + 20) return;
+    if (ihl < 20 || ip_len < (size_t)ihl + 20) return;
 
     const uint8_t *sip = ip + 12;
     const uint8_t *dip = ip + 16;

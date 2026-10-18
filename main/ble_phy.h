@@ -15,6 +15,8 @@ extern "C" {
  * Parse BLE coded PHY flags from advertisement data.
  * Returns true if any PHY evidence was found.
  */
+static inline esp_err_t ble_phy_init(void) { return ESP_OK; }
+
 bool ble_phy_parse(const uint8_t *data, uint8_t len,
                    bool *out_phy_coded, bool *out_phy_coded_s8,
                    bool *out_phy_1m, bool *out_phy_2m,

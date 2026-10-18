@@ -39,4 +39,5 @@ void ble_mitm_tick(uint64_t ts_us);
 #ifdef __cplusplus
 }
 #endif
-#endif
+
+#endif /* BLE_MITM_H */

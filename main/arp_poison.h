@@ -1,6 +1,7 @@
 #ifndef ARP_POISON_H
 #define ARP_POISON_H
 
+#include <stdatomic.h>
 #include "common_types.h"
 #include "esp_err.h"
 

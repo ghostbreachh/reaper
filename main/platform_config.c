@@ -43,13 +43,14 @@ esp_err_t platform_config_init(void)
     esp_err_t rc = nvs_open(NVS_NS, NVS_READONLY, &h);
     if (rc == ESP_OK) {
         uint8_t v = 0;
-        if (persist_get_u8(h, NVS_KEY, &v) == ESP_OK && v < CONFIG_PROFILE_COUNT) {
+        if (nvs_get_u8(h, NVS_KEY, &v) == ESP_OK && v < CONFIG_PROFILE_COUNT) {
             loaded = (config_profile_t)v;
         }
         nvs_close(h);
     }
     
     atomic_store(&s_profile, loaded);
+    (void)profile_name;
     ESP_LOGI(TAG, "Config profile initialized: %s", profile_name(loaded));
     return ESP_OK;
 }
@@ -113,7 +114,7 @@ esp_err_t platform_config_save(void)
     esp_err_t rc = nvs_open(NVS_NS, NVS_READWRITE, &h);
     if (rc != ESP_OK) return rc;
     
-    rc = persist_set_u8(h, NVS_KEY, (uint8_t)current);
+    rc = nvs_set_u8(h, NVS_KEY, (uint8_t)current);
     if (rc == ESP_OK) rc = nvs_commit(h);
     nvs_close(h);
     

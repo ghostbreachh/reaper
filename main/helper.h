@@ -88,7 +88,6 @@
 #include "btm.h"
 #include "wps_pixiedust.h"
 #include "eap_capture.h"
-#include "tx_bypass.h"
 
 /* ─── BLE Core ──────────────────────────────────────────────────────────── */
 #include "ble_scanner.h"

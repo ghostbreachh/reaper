@@ -63,7 +63,7 @@ esp_err_t health_ai_monitor_update(void)
         return ESP_FAIL;
     }
 
-    health_ai_state_t new_state = classify(m.free_heap, m.free_psram, m.cpu_temp_c);
+    health_ai_state_t new_state = classify((unsigned)m.free_heap, (unsigned)m.free_psram, (int)m.cpu_temp_c);
     
     /* Prevent overwriting HEALING state unless the system has recovered to OK */
     health_ai_state_t current = (health_ai_state_t)atomic_load(&s_state);
@@ -75,7 +75,7 @@ esp_err_t health_ai_monitor_update(void)
 
     if (new_state == HEALTH_AI_STATE_CRITICAL) {
         ESP_LOGW(TAG, "System critical: heap=%u psram=%u temp=%d",
-                 m.free_heap, m.free_psram, m.cpu_temp_c);
+                 (unsigned)m.free_heap, (unsigned)m.free_psram, (int)m.cpu_temp_c);
     }
     return ESP_OK;
 }
@@ -98,11 +98,11 @@ esp_err_t health_ai_monitor_json(char *out, size_t max)
     if (m.cpu_temp_c == INT32_MIN) {
         n = snprintf(out, max,
             "{\"state\":\"%s\",\"heap\":%u,\"psram\":%u,\"temp\":null}",
-            state_name(current), m.free_heap, m.free_psram);
+            state_name(current), (unsigned)m.free_heap, (unsigned)m.free_psram);
     } else {
         n = snprintf(out, max,
             "{\"state\":\"%s\",\"heap\":%u,\"psram\":%u,\"temp\":%.1f}",
-            state_name(current), m.free_heap, m.free_psram,
+            state_name(current), (unsigned)m.free_heap, (unsigned)m.free_psram,
             (float)m.cpu_temp_c / 100.0f);
     }
     
@@ -132,6 +132,7 @@ esp_err_t health_ai_monitor_heal(void)
      */
      
     size_t min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    (void)min_free;
     ESP_LOGI(TAG, "Pre-heal min free heap: %u", (unsigned)min_free);
     
     /* TODO: Implement actual cache clearing here */

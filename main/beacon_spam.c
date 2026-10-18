@@ -33,6 +33,8 @@ static const char *TAG = "beacon_spam";
  * ========================================================================== */
 
 static atomic_bool g_beacon_spam_active = ATOMIC_VAR_INIT(false);
+static atomic_bool g_rogue_active = ATOMIC_VAR_INIT(false);
+static atomic_bool g_portal_active = ATOMIC_VAR_INIT(false);
 static TaskHandle_t g_beacon_task_handle = NULL;
 
 static char g_beacon_ssids[MAX_BEACON_SSIDS][33];
@@ -185,7 +187,7 @@ esp_err_t beacon_spam_start(const char **ssids, int count, uint8_t channel, uint
 
 esp_err_t beacon_spam_start_builtin(uint8_t channel)
 {
-    return beacon_spam_start(BUILTIN_BEACONS, (int)BUILTIN_BEACON_COUNT, channel, 50);
+    return beacon_spam_start((const char **)BUILTIN_BEACONS, (int)BUILTIN_BEACON_COUNT, channel, 50);
 }
 
 void beacon_spam_stop(void)
@@ -204,7 +206,6 @@ bool beacon_spam_is_active(void) { return atomic_load(&g_beacon_spam_active); }
  *  SECTION 2: ROGUE AP CLONE
  * ========================================================================== */
 
-static atomic_bool g_rogue_active = ATOMIC_VAR_INIT(false);
 static char g_rogue_ssid[33] = {0};
 
 esp_err_t rogue_ap_start(const char *ssid, uint8_t channel, bool open)
@@ -265,7 +266,6 @@ bool rogue_ap_is_active(void) { return atomic_load(&g_rogue_active); }
 
 static httpd_handle_t g_portal_httpd = NULL;
 static TaskHandle_t g_dns_task_handle = NULL;
-static atomic_bool g_portal_active = ATOMIC_VAR_INIT(false);
 static atomic_bool g_dns_run = ATOMIC_VAR_INIT(false);
 
 static const char PORTAL_HTML[] =

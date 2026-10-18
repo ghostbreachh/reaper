@@ -601,6 +601,8 @@ esp_err_t ai_train_stop(void)
 
     xSemaphoreGive(g_lock);
 
+    (void)mode; (void)wifi_pkts; (void)wifi_labels; (void)wifi_dropped;
+    (void)ble_pkts; (void)ble_labels; (void)ble_dropped;
     ESP_LOGI(TAG,
              "Training capture stopped: mode=%s wifi=%" PRIu32 "/%" PRIu32
              " ble=%" PRIu32 "/%" PRIu32 " dropped=%" PRIu32,

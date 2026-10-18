@@ -212,7 +212,7 @@ esp_err_t structured_log_export_json(const char *path)
     fprintf(f, "\n]\n");
     fclose(f);
 
-    ESP_LOGI(TAG, "Exported %u entries to %s", exported_count, path);
+    ESP_LOGI(TAG, "Exported %u entries to %s", (unsigned)exported_count, path);
     return ESP_OK;
 }
 

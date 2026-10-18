@@ -21,6 +21,9 @@
 #include "esp_wifi.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#if __has_include("esp_random.h")
+#include "esp_random.h"
+#endif
 #include "esp_heap_caps.h"
 
 #include "channel_hopper.h"
@@ -662,6 +665,7 @@ esp_err_t channel_hopper_set_dwell_us(uint32_t us)
 
     xSemaphoreGive(g_cfg_mutex);
 
+    (void)effective_us;
     ESP_LOGI(TAG, "Dwell set to %" PRIu32 " us", effective_us);
     return ESP_OK;
 }

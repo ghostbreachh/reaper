@@ -1,12 +1,17 @@
 #include "stealth.h"
 
+#include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 #include <stdatomic.h>
 
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
+#if __has_include("esp_random.h")
+#include "esp_random.h"
+#endif
 #include "esp_mac.h" /* For MACSTR / MAC2STR if needed, or manual print */
 
 #include "freertos/FreeRTOS.h"

@@ -12,15 +12,14 @@
 #include "storage_sd.h"
 #include "nvs_flash.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
-/* State-of-the-Art: Use mbedtls for hardware-accelerated PBKDF2/SHA1 */
-#include "mbedtls/pkcs5.h"
-#include "mbedtls/md.h"
+/* Self-contained RFC 3174 SHA-1, HMAC-SHA1 & PBKDF2-HMAC-SHA1 */
 
 static const char *TAG = "handshake";
 static const uint8_t HS_ZERO_MAC[6] = {0};
@@ -45,26 +44,173 @@ static SemaphoreHandle_t g_lock = NULL;
  *  Hardware-Accelerated PBKDF2-SHA1 & WPA2 PTK Derivation
  * ========================================================================== */
 
+typedef struct {
+    uint32_t state[5];
+    uint64_t count;
+    uint8_t buffer[64];
+} sha1_ctx_t;
+
+static inline uint32_t sha1_rol32(uint32_t value, uint32_t bits)
+{
+    return (value << bits) | (value >> (32U - bits));
+}
+
+static void sha1_transform(uint32_t state[5], const uint8_t buffer[64])
+{
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++) {
+        w[i] = ((uint32_t)buffer[i * 4 + 0] << 24) |
+               ((uint32_t)buffer[i * 4 + 1] << 16) |
+               ((uint32_t)buffer[i * 4 + 2] << 8)  |
+               ((uint32_t)buffer[i * 4 + 3]);
+    }
+    for (int i = 16; i < 80; i++) {
+        w[i] = sha1_rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    }
+
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3], e = state[4];
+
+    for (int i = 0; i < 80; i++) {
+        uint32_t f, k;
+        if (i < 20) {
+            f = (b & c) | ((~b) & d);
+            k = 0x5A827999UL;
+        } else if (i < 40) {
+            f = b ^ c ^ d;
+            k = 0x6ED9EBA1UL;
+        } else if (i < 60) {
+            f = (b & c) | (b & d) | (c & d);
+            k = 0x8F1BBCDCUL;
+        } else {
+            f = b ^ c ^ d;
+            k = 0xCA62C1D6UL;
+        }
+        uint32_t temp = sha1_rol32(a, 5) + f + e + k + w[i];
+        e = d; d = c; c = sha1_rol32(b, 30); b = a; a = temp;
+    }
+
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d; state[4] += e;
+}
+
+static void sha1_init(sha1_ctx_t *ctx)
+{
+    ctx->state[0] = 0x67452301UL;
+    ctx->state[1] = 0xEFCDAB89UL;
+    ctx->state[2] = 0x98BADCFEUL;
+    ctx->state[3] = 0x10325476UL;
+    ctx->state[4] = 0xC3D2E1F0UL;
+    ctx->count = 0;
+    memset(ctx->buffer, 0, sizeof(ctx->buffer));
+}
+
+static void sha1_update(sha1_ctx_t *ctx, const uint8_t *data, size_t len)
+{
+    if (len == 0) return;
+    size_t idx = (size_t)((ctx->count >> 3) & 0x3FU);
+    ctx->count += (uint64_t)len << 3;
+    size_t part_len = 64U - idx;
+    size_t i = 0;
+    if (len >= part_len) {
+        memcpy(&ctx->buffer[idx], data, part_len);
+        sha1_transform(ctx->state, ctx->buffer);
+        for (i = part_len; i + 63U < len; i += 64U) {
+            sha1_transform(ctx->state, &data[i]);
+        }
+        idx = 0;
+    }
+    memcpy(&ctx->buffer[idx], &data[i], len - i);
+}
+
+static void sha1_final(sha1_ctx_t *ctx, uint8_t digest[20])
+{
+    uint8_t bits[8];
+    for (int i = 0; i < 8; i++) {
+        bits[i] = (uint8_t)(ctx->count >> ((7 - i) * 8));
+    }
+    size_t idx = (size_t)((ctx->count >> 3) & 0x3FU);
+    size_t pad_len = (idx < 56U) ? (56U - idx) : (120U - idx);
+    uint8_t pad[64];
+    memset(pad, 0, sizeof(pad));
+    pad[0] = 0x80U;
+    sha1_update(ctx, pad, pad_len);
+    sha1_update(ctx, bits, 8);
+    for (int i = 0; i < 5; i++) {
+        digest[i * 4 + 0] = (uint8_t)(ctx->state[i] >> 24);
+        digest[i * 4 + 1] = (uint8_t)(ctx->state[i] >> 16);
+        digest[i * 4 + 2] = (uint8_t)(ctx->state[i] >> 8);
+        digest[i * 4 + 3] = (uint8_t)(ctx->state[i]);
+    }
+}
+
+static void hmac_sha1(const uint8_t *key, size_t key_len,
+                      const uint8_t *data, size_t data_len,
+                      uint8_t out[20])
+{
+    uint8_t k_ipad[64];
+    uint8_t k_opad[64];
+    uint8_t tk[20];
+
+    if (key_len > 64) {
+        sha1_ctx_t tctx;
+        sha1_init(&tctx);
+        sha1_update(&tctx, key, key_len);
+        sha1_final(&tctx, tk);
+        key = tk;
+        key_len = 20;
+    }
+
+    memset(k_ipad, 0x36, sizeof(k_ipad));
+    memset(k_opad, 0x5c, sizeof(k_opad));
+    for (size_t i = 0; i < key_len; i++) {
+        k_ipad[i] ^= key[i];
+        k_opad[i] ^= key[i];
+    }
+
+    sha1_ctx_t ctx;
+    uint8_t inner[20];
+    sha1_init(&ctx);
+    sha1_update(&ctx, k_ipad, 64);
+    sha1_update(&ctx, data, data_len);
+    sha1_final(&ctx, inner);
+
+    sha1_init(&ctx);
+    sha1_update(&ctx, k_opad, 64);
+    sha1_update(&ctx, inner, 20);
+    sha1_final(&ctx, out);
+}
+
 static void pbkdf2_sha1(const char *pw, const char *ssid, uint8_t out[32])
 {
-    mbedtls_md_context_t ctx;
-    mbedtls_md_init(&ctx);
-    
-    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
-    if (info == NULL) return;
-    
-    mbedtls_md_setup(&ctx, info, 1); /* 1 = HMAC */
-    
     size_t pw_len = strlen(pw);
     size_t salt_len = strlen(ssid);
-    
-    /* WPA2 standard: 4096 iterations, 32 bytes output (256 bits) */
-    mbedtls_pkcs5_pbkdf2_hmac(&ctx, 
-                              (const unsigned char *)pw, pw_len,
-                              (const unsigned char *)ssid, salt_len,
-                              4096, 32, out);
-                              
-    mbedtls_md_free(&ctx);
+    uint8_t salt_blk[40];
+    if (salt_len > 32) salt_len = 32;
+    memcpy(salt_blk, ssid, salt_len);
+
+    for (uint32_t block = 1; block <= 2; block++) {
+        uint8_t u[20];
+        uint8_t t[20];
+        salt_blk[salt_len + 0] = 0;
+        salt_blk[salt_len + 1] = 0;
+        salt_blk[salt_len + 2] = 0;
+        salt_blk[salt_len + 3] = (uint8_t)block;
+
+        hmac_sha1((const uint8_t *)pw, pw_len, salt_blk, salt_len + 4, u);
+        memcpy(t, u, 20);
+
+        for (uint32_t i = 1; i < 4096; i++) {
+            hmac_sha1((const uint8_t *)pw, pw_len, u, 20, u);
+            for (int j = 0; j < 20; j++) {
+                t[j] ^= u[j];
+            }
+        }
+
+        if (block == 1) {
+            memcpy(out, t, 20);
+        } else {
+            memcpy(out + 20, t, 12);
+        }
+    }
 }
 
 /* 
@@ -75,30 +221,21 @@ static void pbkdf2_sha1(const char *pw, const char *ssid, uint8_t out[32])
 static void wpa2_prf_512(const uint8_t *pmk, const char *label, 
                          const uint8_t *context, size_t ctx_len, uint8_t *out)
 {
-    mbedtls_md_context_t ctx;
-    mbedtls_md_init(&ctx);
-    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
-    mbedtls_md_setup(&ctx, info, 1);
-
     size_t label_len = strlen(label);
-    uint8_t zero = 0;
-    uint8_t hmac_out[20];
+    uint8_t msg[128];
+    if (label_len + 1 + ctx_len + 1 > sizeof(msg)) return;
 
-    /* We need 64 bytes (512 bits), so 4 iterations of SHA1 (20 bytes each) */
+    memcpy(msg, label, label_len);
+    msg[label_len] = 0;
+    memcpy(msg + label_len + 1, context, ctx_len);
+
     for (uint8_t i = 0; i < 4; i++) {
-        mbedtls_md_hmac_starts(&ctx, pmk, 32);
-        mbedtls_md_hmac_update(&ctx, (const uint8_t *)label, label_len);
-        mbedtls_md_hmac_update(&ctx, &zero, 1);
-        mbedtls_md_hmac_update(&ctx, context, ctx_len);
-        mbedtls_md_hmac_update(&ctx, &i, 1);
-        mbedtls_md_hmac_finish(&ctx, hmac_out);
-        
-        /* Copy 20 bytes, except for the last iteration where we only need 4 bytes to reach 64 total */
-        size_t copy_len = (i == 3) ? 4 : 20; 
+        uint8_t hmac_out[20];
+        msg[label_len + 1 + ctx_len] = i;
+        hmac_sha1(pmk, 32, msg, label_len + 1 + ctx_len + 1, hmac_out);
+        size_t copy_len = (i == 3) ? 4 : 20;
         memcpy(out + (i * 20), hmac_out, copy_len);
     }
-
-    mbedtls_md_free(&ctx);
 }
 
 /* ==========================================================================
@@ -119,6 +256,12 @@ static const char *const BUILTIN_WORDS[] = {
 };
 #define BUILTIN_WORD_COUNT (sizeof(BUILTIN_WORDS) / sizeof(BUILTIN_WORDS[0]))
 
+static void capture_timer_cb(void *arg)
+{
+    (void)arg;
+    handshake_capture_stop();
+}
+
 esp_err_t handshake_init(void)
 {
     if (g_lock == NULL) {
@@ -129,30 +272,17 @@ esp_err_t handshake_init(void)
     xSemaphoreTake(g_lock, portMAX_DELAY);
     memset(&g_hs, 0, sizeof(g_hs));
     xSemaphoreGive(g_lock);
-    
+
     if (g_capture_timer == NULL) {
         esp_timer_create_args_t timer_args = {
-            .callback = (esp_timer_cb_t)handshake_capture_stop, /* Will fix below */
+            .callback = capture_timer_cb,
             .name = "hs_capture_timer"
         };
-        /* Wrapper needed for correct signature */
         esp_timer_create(&timer_args, &g_capture_timer);
     }
-    
+
     ESP_LOGI(TAG, "Handshake module ready (mbedtls HW-accelerated)");
     return ESP_OK;
-}
-
-/* Proper timer callback wrapper */
-static void capture_timer_cb(void *arg) {
-    (void)arg;
-    handshake_capture_stop();
-}
-
-/* Update init to use the wrapper */
-__attribute__((constructor)) static void fix_timer_init(void) {
-    /* This is a hack to avoid rewriting the whole init block above in the thought process, 
-       but in the actual code below, I will just put it in handshake_init directly. */
 }
 
 const char *const *handshake_wordlist(size_t *count)
@@ -384,11 +514,6 @@ static void handshake_crack_task(void *arg)
         memcpy(context + 44, hs.anonce, 32);
     }
 
-    mbedtls_md_context_t md_ctx;
-    mbedtls_md_init(&md_ctx);
-    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA1);
-    mbedtls_md_setup(&md_ctx, info, 1);
-
     for (size_t i = 0; i < count; i++) {
         if (atomic_load(&g_hs_crack_stop)) break;
 
@@ -406,9 +531,7 @@ static void handshake_crack_task(void *arg)
         uint8_t *kck = ptk; 
 
         uint8_t mic[20];
-        mbedtls_md_hmac_starts(&md_ctx, kck, 16);
-        mbedtls_md_hmac_update(&md_ctx, hs.eapol, hs.eapol_len);
-        mbedtls_md_hmac_finish(&md_ctx, mic);
+        hmac_sha1(kck, 16, hs.eapol, hs.eapol_len, mic);
 
         if (memcmp(mic, hs.mic, 16) == 0) {
             snprintf(g_hs_found_password, sizeof(g_hs_found_password), "%s", pw);
@@ -420,8 +543,6 @@ static void handshake_crack_task(void *arg)
         /* Yield periodically to prevent watchdog resets on large wordlists */
         if ((i % 10) == 0) vTaskDelay(1);
     }
-
-    mbedtls_md_free(&md_ctx);
     atomic_store(&g_hs_crack_running, false);
     g_crack_task_handle = NULL;
     vTaskDelete(NULL);

@@ -19,7 +19,7 @@
 
 static const char *TAG = "ai_rogue";
 
-#define AI_ROGUE_SCAN_INTERVAL_US 1000000ULL /* 1 second */
+#define AI_ROGUE_SCAN_INTERVAL_US 1000000LL /* 1 second */
 
 typedef enum {
     ROGUE_SEC_OPEN = 0,
@@ -318,6 +318,7 @@ esp_err_t ai_rogue_detector_scan(void)
 
     xSemaphoreGive(g_lock);
 
+    (void)final_count;
     ESP_LOGI(TAG, "Rogue scan complete: %u alerts", final_count);
     return ESP_OK;
 }

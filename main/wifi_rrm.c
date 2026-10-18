@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include "esp_log.h"
 
-static const char *TAG = "wifi_rrm";
 
 #define IE_NEIGHBOR_REPORT  52
 #define IE_MBSSID          55
@@ -150,6 +149,7 @@ bool wifi_he_parse(const uint8_t *ies, size_t len,
         if (tag_id == IE_HE_CAPABILITIES && tag_len >= 4) {
             /* HE MAC Capabilities Info at bytes 2-3 */
             uint16_t he_mac = (uint16_t)(ies[pos + 2] | ((uint16_t)ies[pos + 3] << 8));
+            (void)he_mac;
 
             /* HE PHY Capabilities Info at bytes 4-5 */
             uint16_t he_phy = (uint16_t)(ies[pos + 4] | ((uint16_t)ies[pos + 5] << 8));

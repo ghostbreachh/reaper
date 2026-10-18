@@ -34,6 +34,12 @@ typedef struct {
     void *user_ctx;
 } jsonrpc_method_entry_t;
 
+#define JSONRPC_CODE_PARSE_ERROR      (-32700)
+#define JSONRPC_CODE_INVALID_REQUEST  (-32600)
+#define JSONRPC_CODE_METHOD_NOT_FOUND (-32601)
+#define JSONRPC_CODE_INVALID_PARAMS   (-32602)
+#define JSONRPC_CODE_INTERNAL_ERROR   (-32603)
+
 typedef enum {
     JSONRPC_EVENT_UNKNOWN = 0,
     JSONRPC_EVENT_WIFI_AP,
@@ -45,6 +51,8 @@ typedef enum {
     JSONRPC_EVENT_PCAP,
     JSONRPC_EVENT_DEAUTH,
     JSONRPC_EVENT_DIAG,
+    JSONRPC_EVENT_OTA_PROGRESS,
+    JSONRPC_EVENT_COUNT,
 } jsonrpc_event_type_t;
 
 typedef struct {
@@ -70,6 +78,8 @@ esp_err_t jsonrpc_deinit(void);
 void jsonrpc_handle_message(const char *frame);
 
 esp_err_t jsonrpc_event_post(jsonrpc_event_type_t type, const char *event_json);
+esp_err_t jsonrpc_send_result(int32_t id, const char *result_json, char *out, size_t out_sz);
+esp_err_t jsonrpc_send_error(int32_t id, int32_t code, const char *message, char *out, size_t out_sz);
 
 bool jsonrpc_is_host_connected(void);
 port_transport_t jsonrpc_active_transport(void);

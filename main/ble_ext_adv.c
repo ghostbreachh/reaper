@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include "esp_log.h"
 
-static const char *TAG = "ble_ext_adv";
 
 /* BLE advertising data types */
 #define ADV_TYPE_FLAGS                   0x01

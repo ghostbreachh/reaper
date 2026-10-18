@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 
@@ -100,6 +101,7 @@ esp_err_t storage_init(void)
     
     /* Calculate and log capacity */
     uint64_t capacity_bytes = (uint64_t)g_sd_card->csd.capacity * g_sd_card->csd.sector_size;
+    (void)capacity_bytes;
     ESP_LOGI(TAG, "SD Card mounted successfully at %s (%.2f MB)", 
              SD_MOUNT_POINT, 
              (double)capacity_bytes / (1024.0 * 1024.0));
@@ -150,4 +152,11 @@ bool storage_is_ready(void)
 const char* storage_sd_get_mount_point(void)
 {
     return SD_MOUNT_POINT;
+}
+
+void storage_sd_print_info(FILE *out)
+{
+    if (out != NULL && g_sd_card != NULL) {
+        sdmmc_card_print_info(out, g_sd_card);
+    }
 }

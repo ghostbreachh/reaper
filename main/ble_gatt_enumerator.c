@@ -70,7 +70,6 @@ esp_err_t ble_gatt_enumerator_enumerate(const uint8_t *mac, uint32_t timeout_ms)
         return err;
     }
     for (size_t i = 0; i < s_svc_count; i++) {
-        size_t idx = i;
         ble_gattc_discover_chars(conn,
                                  s_svcs[i].start_handle,
                                  s_svcs[i].end_handle,

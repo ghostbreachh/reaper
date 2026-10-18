@@ -528,7 +528,7 @@ esp_err_t ai_ble_profiler_classify(const ble_info_t *info,
     out->cls = cls;
     snprintf(out->label, sizeof(out->label), "%s", ble_class_name(cls));
     out->adv_type = info->adv_mode;
-    out->flags = feat->ad_flags;
+    out->flags = feat.ad_flags;
     out->model_loaded = false;
     out->inference_us = 0;
 

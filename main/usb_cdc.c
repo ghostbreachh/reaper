@@ -5,18 +5,34 @@
  */
 
 #include <string.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdatomic.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_system.h"
+#include "esp_mac.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 
+#if __has_include("tusb.h")
 #include "tusb.h"  /* Required for tud_cdc_* APIs */
+#else
+#ifndef CFG_TUD_CDC_TX_BUFSIZE
+#define CFG_TUD_CDC_TX_BUFSIZE 64
+#endif
+static inline bool tud_cdc_connected(void) { return false; }
+static inline uint32_t tud_cdc_write_available(void) { return 0; }
+static inline uint32_t tud_cdc_write(const void *buffer, uint32_t bufsize) { (void)buffer; (void)bufsize; return 0; }
+static inline uint32_t tud_cdc_write_flush(void) { return 0; }
+static inline uint32_t tud_cdc_available(void) { return 0; }
+static inline uint32_t tud_cdc_read(void *buffer, uint32_t bufsize) { (void)buffer; (void)bufsize; return 0; }
+#endif
 
 #include "usb_cdc.h"
 
@@ -376,7 +392,7 @@ esp_err_t usb_cdc_caps_to_json(char *buf, size_t bufsz)
         caps.rts_active ? "true" : "false",
         caps.vid, caps.pid,
         caps.serial, caps.manufacturer, caps.product,
-        caps.tx_avail);
+        (unsigned)caps.tx_avail);
 
     if (n < 0 || (size_t)n >= bufsz) return ESP_ERR_NO_MEM;
     return ESP_OK;

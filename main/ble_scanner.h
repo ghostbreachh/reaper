@@ -10,6 +10,8 @@ extern "C" {
 #endif
 
 esp_err_t ble_scanner_init(void);
+bool ble_scanner_is_initialized(void);
+uint16_t ble_scanner_count_rpas(void);
 esp_err_t ble_scanner_start(uint32_t duration_sec);
 esp_err_t ble_scanner_stop(void);
 

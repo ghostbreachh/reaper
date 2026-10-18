@@ -16,6 +16,9 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include <cJSON.h>
+#if __has_include("tusb.h")
+#include "tusb.h"
+#endif
 
 static const char *TAG = "jsonrpc";
 
@@ -45,6 +48,7 @@ void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
     usb_cdc_set_dtr_rts(dtr, rts);
 }
 
+#if __has_include("tusb.h")
 void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding)
 {
     (void)itf;
@@ -58,6 +62,7 @@ void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding)
     };
     usb_cdc_set_line_coding(&lc);
 }
+#endif
 
 /* -------------------------------------------------------------------------
  *  TX Task: Drains queue and writes to active transport
@@ -105,7 +110,7 @@ static esp_err_t queue_tx_message(const char *str)
 /* -------------------------------------------------------------------------
  *  Response Builders
  * ----------------------------------------------------------------------- */
-static esp_err_t jsonrpc_send_error(int32_t id, int32_t code, const char *message, const char *data_json)
+static esp_err_t jsonrpc_tx_error(int32_t id, int32_t code, const char *message, const char *data_json)
 {
     cJSON *root = cJSON_CreateObject();
     if (!root) return ESP_ERR_NO_MEM;
@@ -130,7 +135,7 @@ static esp_err_t jsonrpc_send_error(int32_t id, int32_t code, const char *messag
     return ret;
 }
 
-static esp_err_t jsonrpc_send_result(int32_t id, const char *result_json)
+static esp_err_t jsonrpc_tx_result(int32_t id, const char *result_json)
 {
     cJSON *root = cJSON_CreateObject();
     if (!root) return ESP_ERR_NO_MEM;
@@ -164,7 +169,7 @@ static esp_err_t jsonrpc_send_result(int32_t id, const char *result_json)
 static esp_err_t jsonrpc_dispatch_call(const char *method, const char *params_json, int32_t id)
 {
     if (!g_dispatch || !g_dispatch->methods) {
-        return jsonrpc_send_error(id, -32603, "Internal error", NULL);
+        return jsonrpc_tx_error(id, -32603, "Internal error", NULL);
     }
 
     for (uint16_t i = 0; i < g_dispatch->method_count; i++) {
@@ -175,16 +180,16 @@ static esp_err_t jsonrpc_dispatch_call(const char *method, const char *params_js
             esp_err_t r = g_dispatch->methods[i].fn(method, params_json, resp, sizeof(resp) - 1, g_dispatch->methods[i].user_ctx);
             
             if (r == ESP_OK) {
-                return jsonrpc_send_result(id, resp[0] ? resp : NULL);
+                return jsonrpc_tx_result(id, resp[0] ? resp : NULL);
             }
 
             char data_buf[128];
             snprintf(data_buf, sizeof(data_buf), "{\"module\":\"jsonrpc\",\"esp_err\":\"%s\"}", esp_err_to_name(r));
-            return jsonrpc_send_error(id, -32603, "Internal error", data_buf);
+            return jsonrpc_tx_error(id, -32603, "Internal error", data_buf);
         }
     }
 
-    return jsonrpc_send_error(id, -32601, "Method not found", NULL);
+    return jsonrpc_tx_error(id, -32601, "Method not found", NULL);
 }
 
 /* -------------------------------------------------------------------------
@@ -199,7 +204,7 @@ void jsonrpc_handle_message(const char *frame)
 
     cJSON *req = cJSON_Parse(frame);
     if (!req) {
-        jsonrpc_send_error(0, -32700, "Parse error", NULL);
+        jsonrpc_tx_error(0, -32700, "Parse error", NULL);
         return;
     }
 
@@ -230,7 +235,7 @@ void jsonrpc_handle_message(const char *frame)
         cJSON *jparams = cJSON_GetObjectItem(req, "params");
 
         if (!jmethod || !cJSON_IsString(jmethod)) {
-            jsonrpc_send_error(0, -32600, "Invalid Request", NULL);
+            jsonrpc_tx_error(0, -32600, "Invalid Request", NULL);
         } else {
             const char *method = cJSON_GetStringValue(jmethod);
             char *params_str = jparams ? cJSON_PrintUnformatted(jparams) : NULL;
@@ -240,7 +245,7 @@ void jsonrpc_handle_message(const char *frame)
             if (params_str) cJSON_free(params_str);
         }
     } else {
-        jsonrpc_send_error(0, -32600, "Invalid Request", NULL);
+        jsonrpc_tx_error(0, -32600, "Invalid Request", NULL);
     }
 
     cJSON_Delete(req);
@@ -314,8 +319,10 @@ esp_err_t jsonrpc_event_post(jsonrpc_event_type_t type, const char *event_json)
         case JSONRPC_EVENT_CRED:       type_str = "cred"; break;
         case JSONRPC_EVENT_HEALTH:     type_str = "health"; break;
         case JSONRPC_EVENT_PCAP:       type_str = "pcap"; break;
-        case JSONRPC_EVENT_DEAUTH:     type_str = "deauth"; break;
-        case JSONRPC_EVENT_DIAG:       type_str = "diag"; break;
+        case JSONRPC_EVENT_DEAUTH:       type_str = "deauth"; break;
+        case JSONRPC_EVENT_DIAG:         type_str = "diag"; break;
+        case JSONRPC_EVENT_OTA_PROGRESS: type_str = "ota_progress"; break;
+        default:                         type_str = "unknown"; break;
     }
 
     cJSON *root = cJSON_CreateObject();
@@ -350,4 +357,23 @@ port_transport_t jsonrpc_active_transport(void)
 {
     /* Simple getter, assuming port_detect_get_active() exists */
     return port_detect_get_active(); 
+}
+
+esp_err_t jsonrpc_send_result(int32_t id, const char *result_json, char *out, size_t out_sz)
+{
+    (void)id;
+    if (out != NULL && out_sz > 0) {
+        snprintf(out, out_sz, "%s", result_json ? result_json : "true");
+    }
+    return ESP_OK;
+}
+
+esp_err_t jsonrpc_send_error(int32_t id, int32_t code, const char *message, char *out, size_t out_sz)
+{
+    (void)id;
+    if (out != NULL && out_sz > 0) {
+        snprintf(out, out_sz, "{\"error\":{\"code\":%d,\"message\":\"%s\"}}",
+                 (int)code, message ? message : "error");
+    }
+    return (code == JSONRPC_CODE_INVALID_PARAMS) ? ESP_ERR_INVALID_ARG : ESP_FAIL;
 }

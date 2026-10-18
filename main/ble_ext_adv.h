@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "common_types.h"
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,6 +17,8 @@ extern "C" {
  * out_adv_mode:    0=legacy, 1=non-connectable, 2=scannable
  * out_has_scan_rsp: true if this looks like a scan response
  * out_tx_power:    TX power in dBm if present, else 0x7F=unavailable */
+static inline esp_err_t ble_ext_adv_init(void) { return ESP_OK; }
+
 bool ble_ext_adv_parse(const uint8_t *data, uint8_t len,
                        bool *out_has_aux_ptr, bool *out_has_adi,
                        uint8_t *out_adv_mode, bool *out_has_scan_rsp,

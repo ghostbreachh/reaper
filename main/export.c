@@ -299,6 +299,7 @@ esp_err_t export_stop(void)
     export_mode_t prev = g_mode;
     g_mode = EXPORT_MODE_OFF;
     
+    (void)prev;
     ESP_LOGI(TAG, "Export stopped mode=%d packets=%"PRIu32" bytes=%"PRIu32,
              prev, g_packets, g_bytes);
              

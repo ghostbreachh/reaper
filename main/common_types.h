@@ -14,6 +14,10 @@
 #include <time.h>
 
 #include "esp_err.h"
+
+#ifndef ESP_ERR_CANCEL
+#define ESP_ERR_CANCEL 0x10B
+#endif
 #include "esp_log.h"
 
 /* ==========================================================================

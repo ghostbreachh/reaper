@@ -1,16 +1,7 @@
-# Main application component.
-#
-# For now this remains a single large component.
-# Long term, many of these subsystems should become separate components:
-#   transport/
-#   wifi/
-#   ble/
-#   ai/
-#   storage/
-#   offensive/
-#   platform/
-#
-# But this explicit source list is still better than GLOB.
+# ============================================================================
+#  REAPER — main application component
+#  Target: ESP32-S3-N16R8
+# ============================================================================
 
 set(reaper_srcs
     # ------------------------------------------------------------------
@@ -44,7 +35,7 @@ set(reaper_srcs
     cli_transport.c
     jsonrpc.c
     jsonrpc_schema.c
-    ota_http.c           # <-- ADDED: Was missing from build
+    ota_http.c
     port_detect.c
     usb_cdc.c
 
@@ -65,7 +56,6 @@ set(reaper_srcs
     pcap_ring.c
     wifi_rrm.c
     wifi_sniffer.c
-    # wifi_tx_fix.c      # <-- ADD THIS if you have a .c file for it
 
     # ------------------------------------------------------------------
     # Wi-Fi security / field modules
@@ -132,17 +122,21 @@ set(reaper_srcs
     zigbee_sniffer.c
 )
 
+# ----------------------------------------------------------------------
+# Stable requirements (present in IDF 5.x and 6.x)
+#
+# NOTE: esp_ota_ops is intentionally NOT listed.
+#       The OTA API is provided by app_update.
+# ----------------------------------------------------------------------
 set(priv_reqs
     app_update
     bt
     console
-    driver
     esp_event
     esp_http_client
     esp_http_server
     esp_https_ota
     esp_netif
-    esp_ota_ops
     esp_system
     esp_timer
     esp_wifi
@@ -150,8 +144,6 @@ set(priv_reqs
     freertos
     hal
     heap
-    json
-    led_strip
     log
     lwip
     mbedtls
@@ -159,29 +151,52 @@ set(priv_reqs
     sdmmc
     soc
     spi_flash
-    spiffs
     vfs
 )
 
 # ----------------------------------------------------------------------
-# USB device support
+# Version-sensitive requirements
+#
+# IDF 5.3+ split `driver` into granular components, and some subsystems
+# moved between releases. Resolve these by actual presence in the SDK
+# rather than hard-coding a version-specific name.
 # ----------------------------------------------------------------------
-if(EXISTS "${IDF_PATH}/components/tinyusb")
-    list(APPEND priv_reqs tinyusb)
-endif()
+set(idf_optional_reqs
+    driver
+    json
+    spiffs
+    led_strip
+    efuse
+    bootloader_support
+    esp_security
+    esp_app_format
+    esp_coex
+    esp_partition
+    esp_psram
+    esp_hw_support
+    esp_driver_gpio
+    esp_driver_uart
+    esp_driver_spi
+    esp_driver_rmt
+    esp_driver_tsens
+    esp_driver_sdspi
+    esp_driver_usb_serial_jtag
+    esp_ota_ops
+    usb
+    tinyusb
+)
 
-# ----------------------------------------------------------------------
-# ESP-IDF 5.3+ split driver components
-# ----------------------------------------------------------------------
-foreach(opt_drv
-        esp_driver_gpio
-        esp_driver_uart
-        esp_driver_spi
-        esp_driver_usb_serial_jtag)
-    if(EXISTS "${IDF_PATH}/components/${opt_drv}")
-        list(APPEND priv_reqs ${opt_drv})
+foreach(req IN LISTS idf_optional_reqs)
+    if(EXISTS "${IDF_PATH}/components/${req}")
+        list(APPEND priv_reqs "${req}")
+        message(STATUS "reaper: using IDF component '${req}'")
     endif()
 endforeach()
+
+# ----------------------------------------------------------------------
+# led_strip is a managed component (espressif/led_strip).
+# It is resolved via idf_component.yml and made available to this build.
+# ----------------------------------------------------------------------
 
 idf_component_register(
     SRCS ${reaper_srcs}
@@ -193,13 +208,23 @@ idf_component_register(
 # Compiler warnings
 # ----------------------------------------------------------------------
 target_compile_options(${COMPONENT_LIB} PRIVATE
+    -Os
     -Wall
     -Wextra
     -Wno-unused-parameter
+    -Wno-error=format
+    -Wno-error=format-truncation
+    -Wno-error=stringop-truncation
+    -Wno-error=deprecated-declarations
 )
 
 # ----------------------------------------------------------------------
-# Raw 802.11 frame sanity-check override
+# Raw 802.11 TX sanity-check override
+#
+# tx_bypass.c must define:
+#   int __wrap_ieee80211_raw_frame_sanity_check(int32_t, int32_t, int32_t);
+#
+# Without this wrap, esp_wifi_80211_tx() silently drops injected frames.
 # ----------------------------------------------------------------------
 target_link_options(${COMPONENT_LIB} INTERFACE
     "-Wl,--wrap=ieee80211_raw_frame_sanity_check"

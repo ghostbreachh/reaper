@@ -28,7 +28,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static const char *TAG = "cli";
 
 static uint32_t arg_to_u32(const char *s, uint32_t def)
 {
@@ -110,7 +109,7 @@ void cli_dispatch_command(int argc, char *argv[])
             if (storage_is_ready()) {
                 if (t && t->printf) t->printf("SD card ready.\n");
                 /* Note: Ensure g_sd_card is extern in storage_sd.h */
-                sdmmc_card_print_info(stdout, g_sd_card);
+                storage_sd_print_info(stdout);
             } else {
                 if (t && t->printf) t->printf("SD card not ready.\n");
             }
@@ -356,11 +355,11 @@ void cli_dispatch_command(int argc, char *argv[])
             char path[64];
             if (strcmp(argv[1], "wifi") == 0) {
                 snprintf(path, sizeof(path), "/sd/wifi_%" PRId64 ".txt", esp_timer_get_time());
-                esp_err_t ret = wifi_sniffer_save_report(path);
+                (void)wifi_sniffer_save_report(path);
                 if (t && t->printf) t->printf("Saved: %s\n", path);
             } else if (strcmp(argv[1], "ble") == 0) {
                 snprintf(path, sizeof(path), "/sd/ble_%" PRId64 ".txt", esp_timer_get_time());
-                esp_err_t ret = ble_scanner_save_report(path);
+                (void)ble_scanner_save_report(path);
                 if (t && t->printf) t->printf("Saved: %s\n", path);
             } else {
                 if (t && t->printf) t->printf("Usage: save wifi | save ble\n");
@@ -383,10 +382,11 @@ void cli_dispatch_command(int argc, char *argv[])
         } else if (strcmp(argv[1], "save") == 0) {
             char path[64];
             snprintf(path, sizeof(path), "/sd/creds_%" PRId64 ".txt", esp_timer_get_time());
-            if (storage_is_ready() && creds_save(path) == ESP_OK)
+            if (storage_is_ready() && creds_save(path) == ESP_OK) {
                 if (t && t->printf) t->printf("Saved %s\n", path);
-            else
+            } else {
                 if (t && t->printf) t->printf("Save failed (SD?)\n");
+            }
         }
     } else if (strcmp(argv[0], "beacon") == 0) {
         if (argc < 2) {

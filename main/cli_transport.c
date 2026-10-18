@@ -19,8 +19,11 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#ifdef CONFIG_TINYUSB_CDC_ENABLED
+#if defined(CONFIG_TINYUSB_CDC_ENABLED) && __has_include("tusb.h")
 #include "tusb.h"
+#define REAPER_HAS_TUSB_CDC 1
+#else
+#define REAPER_HAS_TUSB_CDC 0
 #endif
 
 static const char *TAG = "cli";
@@ -130,7 +133,7 @@ static esp_err_t cdc_deinit(void) { return ESP_OK; }
 
 static bool cdc_connected(void)
 {
-#ifdef CONFIG_TINYUSB_CDC_ENABLED
+#if REAPER_HAS_TUSB_CDC
     return tud_cdc_connected();
 #else
     return false;
@@ -139,7 +142,7 @@ static bool cdc_connected(void)
 
 static int cdc_read_line(char *buf, size_t cap, uint32_t timeout_ms)
 {
-#ifdef CONFIG_TINYUSB_CDC_ENABLED
+#if REAPER_HAS_TUSB_CDC
     if (cap == 0) return -1;
     size_t i = 0;
     

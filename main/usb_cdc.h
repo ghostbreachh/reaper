@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include "esp_err.h"
 
+#ifndef ESP_ERR_CANCEL
+#define ESP_ERR_CANCEL 0x10B
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -20,6 +20,7 @@ typedef struct {
 } findmy_device_t;
 
 esp_err_t findmy_init(void);
+static inline esp_err_t ble_findmy_init(void) { return findmy_init(); }
 void findmy_parse_adv(const uint8_t *adv, size_t len,
                       const uint8_t *mac);
 size_t findmy_list(findmy_device_t *out, size_t max);

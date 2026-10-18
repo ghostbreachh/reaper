@@ -28,11 +28,72 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
+#if __has_include("nimble/nimble_port.h")
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
+#else
+/* Fallback definitions when NimBLE is not enabled in sdkconfig */
+#define BLE_GAP_EVENT_DISC          1
+#define BLE_GAP_EVENT_DISC_COMPLETE 2
+#define BLE_GAP_EVENT_ADV_COMPLETE  3
+#define BLE_HCI_SCAN_FILT_NO_WL     0
+#define BLE_HS_FOREVER              (-1)
+#define BLE_HS_ADV_F_DISC_GEN       0x02
+#define BLE_HS_ADV_F_BREDR_UNSUP    0x04
+#define BLE_GAP_CONN_MODE_NON       0
+#define BLE_GAP_DISC_MODE_GEN       2
+
+typedef struct { uint8_t type; uint8_t val[6]; } ble_addr_t;
+struct ble_gap_event {
+    uint8_t type;
+    struct {
+        ble_addr_t addr;
+        int8_t rssi;
+        const uint8_t *data;
+        uint8_t length_data;
+    } disc;
+};
+struct ble_hs_adv_fields {
+    uint8_t flags;
+    const uint8_t *name;
+    uint8_t name_len;
+    const uint8_t *mfg_data;
+    uint8_t mfg_data_len;
+};
+struct ble_gap_disc_params {
+    uint16_t itvl;
+    uint16_t window;
+    uint8_t filter_policy;
+    uint8_t limited;
+    uint8_t passive;
+    uint8_t filter_duplicates;
+};
+struct ble_gap_adv_params {
+    uint8_t conn_mode;
+    uint8_t disc_mode;
+};
+static struct {
+    void (*sync_cb)(void);
+    void (*reset_cb)(int reason);
+} ble_hs_cfg;
+
+static inline esp_err_t nimble_port_init(void) { return ESP_ERR_NOT_SUPPORTED; }
+static inline void nimble_port_run(void) {}
+static inline void nimble_port_freertos_init(void (*fn)(void *)) { (void)fn; }
+static inline void nimble_port_freertos_deinit(void) {}
+static inline void ble_svc_gap_init(void) {}
+static inline int ble_svc_gap_device_name_set(const char *name) { (void)name; return 0; }
+static inline int ble_hs_adv_parse_fields(struct ble_hs_adv_fields *f, const uint8_t *d, uint8_t l) { (void)f; (void)d; (void)l; return -1; }
+static inline int ble_hs_id_infer_auto(int priv, uint8_t *out) { (void)priv; if (out) *out = 0; return 0; }
+static inline int ble_gap_disc(uint8_t own_addr_type, int32_t duration_ms, const struct ble_gap_disc_params *p, int (*cb)(struct ble_gap_event *, void *), void *arg) { (void)own_addr_type; (void)duration_ms; (void)p; (void)cb; (void)arg; return -1; }
+static inline int ble_gap_disc_cancel(void) { return 0; }
+static inline int ble_gap_adv_set_fields(const struct ble_hs_adv_fields *f) { (void)f; return 0; }
+static inline int ble_gap_adv_start(uint8_t own_addr_type, const ble_addr_t *dir, int32_t dur, const struct ble_gap_adv_params *p, int (*cb)(struct ble_gap_event *, void *), void *arg) { (void)own_addr_type; (void)dir; (void)dur; (void)p; (void)cb; (void)arg; return -1; }
+static inline int ble_gap_adv_stop(void) { return 0; }
+#endif
 
 static const char *TAG = "ble_scanner";
 
@@ -235,13 +296,14 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
          * Passing this pointer to another task or queue will cause a Use-After-Free crash.
          */
         ai_ble_profile_t profile;
-        ai_ble_profiler_classify(dev.mac, event->disc.data, event->disc.length_data, &profile);
+        ai_ble_profiler_classify(&dev, event->disc.data, event->disc.length_data, &profile);
         reaction_rules_check_ble(dev.mac);
         ble_mitm_tick((uint64_t)esp_timer_get_time());
         findmy_parse_adv(event->disc.data, event->disc.length_data, dev.mac);
         smarttag_parse_adv(event->disc.data, event->disc.length_data, dev.mac);
 
-        if ((dev.mac[5] & 0xC0) == 0x40) {
+        if (dev.addr_type != 0 && (dev.mac[5] & 0xC0) == 0x40) {
+            dev.rpa_seen = true;
             ble_rpa_bypass_check(dev.mac, NULL);
         }
 
@@ -707,4 +769,24 @@ esp_err_t ble_advertise_stop(void)
     led_set_state(LED_STATE_IDLE);
     ESP_LOGI(TAG, "BLE advertising stopped");
     return ESP_OK;
+}
+
+bool ble_scanner_is_initialized(void)
+{
+    return g_ble_init_done;
+}
+
+uint16_t ble_scanner_count_rpas(void)
+{
+    if (g_ble_lock == NULL) return 0;
+    uint16_t rpas = 0;
+    xSemaphoreTake(g_ble_lock, portMAX_DELAY);
+    for (int i = 0; i < g_ble_count; i++) {
+        if (g_ble_list[i].rpa_seen ||
+            (g_ble_list[i].addr_type != 0 && (g_ble_list[i].mac[5] & 0xC0) == 0x40)) {
+            rpas++;
+        }
+    }
+    xSemaphoreGive(g_ble_lock);
+    return rpas;
 }

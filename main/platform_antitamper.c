@@ -6,8 +6,19 @@
 
 #include "esp_log.h"
 #include "esp_partition.h"
+#if __has_include("esp_secure_boot.h")
 #include "esp_secure_boot.h"
+#else
+static inline bool esp_secure_boot_enabled(void) { return false; }
+#endif
+#if __has_include("esp_flash_encrypt.h")
 #include "esp_flash_encrypt.h"
+#else
+static inline bool esp_flash_encryption_enabled(void) { return false; }
+#endif
+#if __has_include("esp_efuse.h")
+#include "esp_efuse.h"
+#endif
 
 #include "nvs.h"
 
@@ -22,7 +33,11 @@ esp_err_t platform_antitamper_init(void)
     atomic_store(&s_ok, true);
     atomic_store(&s_nvs_ok, true);
     atomic_store(&s_secure_boot_ok, esp_secure_boot_enabled());
+    #if __has_include("esp_efuse.h")
+    atomic_store(&s_flash_enc_ok, esp_efuse_is_flash_encryption_enabled());
+#else
     atomic_store(&s_flash_enc_ok, esp_flash_encryption_enabled());
+#endif
     
     ESP_LOGI(TAG, "Anti-tamper checks initialized (SB:%d, FE:%d)", 
              atomic_load(&s_secure_boot_ok), atomic_load(&s_flash_enc_ok));

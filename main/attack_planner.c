@@ -16,18 +16,6 @@ static const char *TAG = "attack_planner";
 static SemaphoreHandle_t g_lock;
 static planner_stats_t g_stats;
 
-static const char *security_str(uint8_t sec)
-{
-    switch (sec) {
-        case 0: return "open";
-        case 1: return "WEP";
-        case 2: return "WPA";
-        case 3: return "WPA2";
-        case 4: return "WPA3";
-        default: return "unknown";
-    }
-}
-
 static float score_ap(const ap_info_t *ap)
 {
     if (ap == NULL) return 0.0f;
@@ -77,7 +65,6 @@ static void build_steps(const ap_info_t *ap, attack_step_t *steps, uint8_t *coun
 
     /* Handshake/PMKID capture first */
     if (ap->rsn_version && !ap->wpa3_sae) {
-        bool pmkid = false;
         /* Minimal check: if RSN present, assume PMKID possible */
         steps[(*count)++] = ATTACK_STEP_HANDSHAKE_CAPTURE;
         steps[(*count)++] = ATTACK_STEP_PMKID_CAPTURE;
@@ -180,7 +167,7 @@ esp_err_t attack_planner_build_plan(uint32_t ap_index, attack_plan_t *out)
                      out->bssid, out->ssid, out->channel, out->score);
     for (uint8_t i = 0; i < out->step_count && n + 32 < (int)sizeof(out->summary); i++) {
         n += snprintf(out->summary + n, sizeof(out->summary) - (size_t)n,
-                      "%s -> ", step_name(out->steps[i]));
+                      "%s -> ", attack_step_name(out->steps[i]));
     }
     /* Trim trailing arrow */
     if (n > 4 && strcmp(out->summary + n - 4, " -> ") == 0) {
@@ -244,7 +231,7 @@ esp_err_t attack_planner_json(char *buf, size_t bufsz)
 
     int n = snprintf(buf, bufsz,
                      "{\"ap_count\":%u,\"viable\":%u,\"best_idx\":%u,\"best_score\":%.2f}",
-                     st.ap_count, st.viable_count, st.best_idx, (double)st.best_score);
+                     (unsigned)st.ap_count, (unsigned)st.viable_count, (unsigned)st.best_idx, (double)st.best_score);
     return (n < 0 || (size_t)n >= bufsz) ? ESP_ERR_NO_MEM : ESP_OK;
 }
 

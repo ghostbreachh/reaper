@@ -118,6 +118,13 @@ uint32_t channel_hopper_adaptive_dwell(uint8_t channel);
 /*
  * Retrieve statistics for a single 1..13 channel.
  */
+esp_err_t channel_hopper_record_packet(uint8_t channel,
+                                       uint32_t pkt_count,
+                                       uint32_t mgmt_count,
+                                       uint32_t beacon_count,
+                                       uint32_t data_count,
+                                       int8_t rssi);
+
 esp_err_t channel_hopper_get_stats(uint8_t channel, ch_hop_stats_t *out);
 
 /*

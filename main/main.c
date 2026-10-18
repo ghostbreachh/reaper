@@ -8,7 +8,7 @@
  *  Notes:
  *    - When USB CDC is detected, the firmware assumes machine/control mode.
  *    - ANSI console output is suppressed in machine mode.
- *    - JSON-RPC initialization must be wired here before production use.
+ *    - JSON-RPC initialization wired for phone control over CDC.
  * ============================================================================
  */
 
@@ -67,6 +67,8 @@ static bool s_boot_degraded = false;     /* optional module failure */
 static bool s_led_ready = false;         /* LED module successfully initialized */
 
 static port_detect_result_t s_port = {0};
+static jsonrpc_dispatch_t s_rpc_dispatch;
+static jsonrpc_method_entry_t s_rpc_methods[128];
 
 /* ═══════════════════════════════════════════════════════════════════════════
  *  Small UI helpers
@@ -369,25 +371,14 @@ static void run_init_sequence(void)
     BOOT_INIT("USB CDC-ACM Custom VID/PID", usb_cdc_init(), !s_machine_mode);
 
     /*
-     * TODO: initialize JSON-RPC server here.
-     *
-     * This is currently missing from the boot flow.
-     * Without JSON-RPC initialization, phone control over USB CDC will not work.
-     *
-     * Likely future calls:
-     *
-     *   BOOT_INIT("JSON-RPC Server", jsonrpc_init(), false);
-     *   BOOT_INIT("JSON-RPC Schema", jsonrpc_schema_init(), false);
-     *
-     * The exact function names depend on jsonrpc.h / jsonrpc_schema.h.
+     * JSON-RPC server initialization for phone control over CDC.
      */
-    if (s_port.active == PORT_TRANSPORT_CDC) {
-        ESP_LOGW(TAG, "JSON-RPC server is not initialized in main.c yet. "
-                      "Phone control will not work until this is wired.");
-    }
+    uint16_t rpc_count = jsonrpc_schema_v1_build(s_rpc_methods, 128);
+    BOOT_INIT("JSON-RPC Schema v1", (rpc_count > 0) ? ESP_OK : ESP_FAIL, !s_machine_mode);
+    BOOT_INIT("JSON-RPC Server", jsonrpc_init(&s_rpc_dispatch, s_rpc_methods, rpc_count, NULL), !s_machine_mode);
 
     /* Storage and update services */
-    BOOT_INIT("SD Card Storage (SPI2, /sd)", storage_init(), true);
+    BOOT_INIT("SD Card Storage (SPI2, /sd)", storage_sd_init(), true);
     BOOT_INIT("SPIFFS Wordlist Store (5 MiB)", storage_spiffs_init(), true);
     BOOT_INIT("OTA Updater (HTTP + RSA-2048)", ota_http_init(), true);
 
@@ -425,13 +416,8 @@ static void run_init_sequence(void)
     BOOT_INIT("WPS Pixie Dust", wps_pixiedust_init(), false);
     BOOT_INIT("EAP Capture", eap_capture_init(), false);
 
-    /*
-     * TODO: audit channel_hopper lifecycle.
-     *
-     * channel_hopper.c is compiled, but no explicit channel_hopper_init()
-     * appears here. It may be managed internally by wifi_sniffer.c, but that
-     * should be made explicit.
-     */
+    /* Channel hopper (explicit initialization) */
+    BOOT_INIT("Channel Hopper", channel_hopper_init(), false);
 
     /* Wi-Fi core */
     BOOT_INIT("Wi-Fi Coexistence", coex_init(), false);
@@ -439,44 +425,42 @@ static void run_init_sequence(void)
 
     /* BLE core */
     BOOT_INIT("BLE 5.0 Scanner (NimBLE host)", ble_scanner_init(), false);
+    
+    /* BLE submodules (explicit initialization) */
+    BOOT_INIT("BLE Extended Advertising", ble_ext_adv_init(), true);
+    BOOT_INIT("BLE Periodic Advertising", ble_periodic_init(), true);
+    BOOT_INIT("BLE PHY Detection", ble_phy_init(), true);
+    BOOT_INIT("BLE ISO/BIG", ble_iso_init(), true);
+    BOOT_INIT("BLE GATT Client", ble_gatt_client_init(), true);
+    BOOT_INIT("BLE GATT Enumerator", ble_gatt_enumerator_init(), true);
+    BOOT_INIT("BLE MITM", ble_mitm_init(), true);
+    BOOT_INIT("BLE RPA Bypass", ble_rpa_bypass_init(), true);
+    BOOT_INIT("BLE FindMy", ble_findmy_init(), true);
+    BOOT_INIT("BLE SmartTag", ble_smarttag_init(), true);
+    BOOT_INIT("BLE Privacy", ble_privacy_init(), true);
+    
     BOOT_INIT("GPS Timestamp Correlator", gps_init(), false);
-
-    /*
-     * TODO: audit BLE submodules.
-     *
-     * These are compiled but not explicitly initialized here:
-     *
-     *   ble_ext_adv.c
-     *   ble_periodic.c
-     *   ble_phy.c
-     *   ble_iso.c
-     *   ble_gatt_client.c
-     *   ble_gatt_enumerator.c
-     *   ble_mitm.c
-     *   ble_rpa_bypass.c
-     *   ble_findmy.c
-     *   ble_smarttag.c
-     *   ble_privacy.c
-     *
-     * If they are started internally by ble_scanner.c, that should be documented.
-     * Otherwise they need explicit lifecycle calls.
-     */
 
     /* Network attack/capture engines */
     BOOT_INIT("ARP Poison Engine (MITM + relay)", arp_poison_init(), false);
     BOOT_INIT("HTTP Credential Sniffer (form/cookie/Basic)", creds_init(), false);
     BOOT_INIT("WPA-2 Handshake Capture + Crack (EAPOL)", handshake_init(), false);
 
+    /* Register Wi-Fi packet observers */
+    wifi_sniffer_register_observer(ai_anomaly_wifi_observer);
+    wifi_sniffer_register_observer(arp_feed_packet);
+    wifi_sniffer_register_observer(arp_relay_frame);
+    wifi_sniffer_register_observer(handshake_feed_packet);
+
     /* Packet capture buffer */
     BOOT_INIT("PCAP Ring Buffer (2 MiB PSRAM)", pcap_ring_init(RING_BYTES), false);
 
     /*
-     * In CDC machine mode, JSON-RPC should own the control transport.
-     * CLI is kept for compatibility until JSON-RPC is fully wired.
+     * In CDC machine mode, JSON-RPC owns the control transport.
+     * CLI is kept for compatibility and UART fallback.
      */
     if (s_port.active == PORT_TRANSPORT_CDC) {
-        ESP_LOGW(TAG, "CDC active: JSON-RPC should own transport. "
-                      "cli_start() is still called for compatibility.");
+        ESP_LOGI(TAG, "CDC active: JSON-RPC owns transport, CLI available as fallback");
     }
 
     BOOT_INIT("Interactive Serial CLI (auto-selected transport)", cli_start(), false);
@@ -524,12 +508,16 @@ static void run_boot_scan(void)
                esp_err_to_name(r));
     } else {
         /*
-         * Wait for the scan to finish.
-         *
-         * TODO: replace this delay with a proper completion event/callback
-         * from wifi_sniffer/channel_hopper.
+         * Poll for scan completion instead of blocking delay.
+         * Check every 100ms for up to BOOT_SCAN_SECS + 2 seconds.
          */
-        vTaskDelay(pdMS_TO_TICKS((BOOT_SCAN_SECS + 1) * 1000));
+        int timeout_ms = (BOOT_SCAN_SECS + 2) * 1000;
+        int elapsed_ms = 0;
+        
+        while (wifi_sniffer_is_active() && elapsed_ms < timeout_ms) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            elapsed_ms += 100;
+        }
 
         uint16_t ap_cnt  = wifi_sniffer_get_ap_count();
         uint16_t cli_cnt = wifi_sniffer_get_client_count();
@@ -595,12 +583,12 @@ static void print_ready_footer(void)
 
     printf("\n");
     printf(UI_GRAY "  Uptime      : " UI_RESET UI_WHITE "%" PRId64 " ms" UI_RESET "\n",
-           esp_timer_get_time() / 1000LL);
+           (int64_t)(esp_timer_get_time() / 1000));
 
     printf(UI_GRAY "  PCAP ring   : " UI_RESET UI_WHITE "2 MiB ready  "
            UI_GRAY "(pcap start → pcap export)" UI_RESET "\n");
 
-    if (storage_is_ready()) {
+    if (storage_sd_is_ready()) {
         printf(UI_GRAY "  SD card     : " UI_RESET UI_GREEN "mounted at /sd" UI_RESET "\n");
     } else {
         printf(UI_GRAY "  SD card     : " UI_RESET UI_YELLOW "not present  "

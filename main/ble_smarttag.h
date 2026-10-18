@@ -20,6 +20,7 @@ typedef struct {
 } smarttag_device_t;
 
 esp_err_t smarttag_init(void);
+static inline esp_err_t ble_smarttag_init(void) { return smarttag_init(); }
 void smarttag_parse_adv(const uint8_t *adv, size_t len,
                         const uint8_t *mac);
 size_t smarttag_list(smarttag_device_t *out, size_t max);

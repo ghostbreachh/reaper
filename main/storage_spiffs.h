@@ -29,6 +29,8 @@ esp_err_t storage_spiffs_load_wordlist(const char *path, void **data_out, size_t
 void storage_spiffs_free_buffer(void *data);
 
 esp_err_t storage_spiffs_list_wordlists(char ***names, size_t *count);
+esp_err_t storage_spiffs_list_wordlists_json(char *buf, size_t bufsz);
+esp_err_t storage_spiffs_load_wordlist_meta(const char *name);
 void storage_spiffs_free_list(char **names, size_t count);
 
 esp_err_t storage_spiffs_usage(uint64_t *total, uint64_t *used);

@@ -21,11 +21,14 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <inttypes.h>
 
 #include "freertos/FreeRTOS.h"
 #include "esp_log.h"
 #include "cJSON.h"
 
+#include "common_types.h"
 #include "jsonrpc.h"
 #include "jsonrpc_schema.h"
 #include "usb_cdc.h"
@@ -54,7 +57,6 @@
 #include "scheduler.h"
 #include "reaction_rules.h"
 #include "export.h"
-#include "export.h"
 #include "pcap_ring.h"
 #include "offensive.h"
 #include "cli_flipper.h"
@@ -82,8 +84,8 @@
 #include "platform_fleet.h"
 #include "health_ai_monitor.h"
 #include "wordlist_manager.h"
+#include "ota_http.h"
 
-static const char *TAG = "jsonrpc_schema";
 
 #define SCHEMA_VERSION "v1.0.0"
 
@@ -963,8 +965,10 @@ static esp_err_t rpc_ai_ble_classify(const char *method, const char *params_json
         }
     }
 
+    ble_info_t ble_info = {0};
+    memcpy(ble_info.mac, mac, 6);
     ai_ble_profile_t profile;
-    esp_err_t rc = ai_ble_profiler_classify(mac, adv_buf, adv_len, &profile);
+    esp_err_t rc = ai_ble_profiler_classify(&ble_info, adv_buf, adv_len, &profile);
     cJSON_Delete(root);
     if (rc != ESP_OK) {
         return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
@@ -1103,6 +1107,15 @@ static esp_err_t rpc_ai_train_status(const char *method, const char *params_json
 }
 
 /*============================================================================*/
+static wardrive_mode_t str_to_mode(const char *mode_str)
+{
+    if (mode_str == NULL) return WARDRIVE_MODE_OFF;
+    if (strcmp(mode_str, "wifi") == 0) return WARDRIVE_MODE_WIFI;
+    if (strcmp(mode_str, "ble") == 0)  return WARDRIVE_MODE_BLE;
+    if (strcmp(mode_str, "both") == 0) return WARDRIVE_MODE_BOTH;
+    return WARDRIVE_MODE_OFF;
+}
+
 static esp_err_t rpc_wardrive_start(const char *method, const char *params_json,
                                     char *out, size_t out_sz, void *user_ctx)
 {
@@ -1659,214 +1672,36 @@ static esp_err_t rpc_export_stop(const char *method, const char *params_json,
 
 /* ============================================================================
  *  OFFENSIVE RESEARCH RPC METHODS
+ *  FIXED: Added user_ctx parameter to match jsonrpc_method_entry_t signature
+ *  FIXED: Properly escaped JSON strings
  * ============================================================================ */
+
 static esp_err_t rpc_offensive_set_mode(const char *method, const char *params_json,
-                                         char *out, size_t outsz)
+                                         char *out, size_t outsz, void *user_ctx)
 {
-    (void)method;
+    (void)method; (void)user_ctx;
     uint32_t mask = 0;
     if (params_json && strlen(params_json) > 0) {
         char *end = NULL;
         mask = (uint32_t)strtoul(params_json, &end, 0);
     }
     offensive_set_mode(mask);
-    snprintf(out, outsz, "{"mode":"0x%08" PRIx32 ""}", offensive_get_mode());
+    snprintf(out, outsz, "{\"mode\":\"0x%08" PRIx32 "\"}", offensive_get_mode());
     return ESP_OK;
 }
 
 static esp_err_t rpc_offensive_get_mode(const char *method, const char *params_json,
-                                         char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    snprintf(out, outsz, "{"mode":"0x%08" PRIx32 ""}", offensive_get_mode());
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_pmkid(const char *method, const char *params_json,
-                                     char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    off_pmkid_t pmkid;
-    if (offensive_get_pmkid(&pmkid) != ESP_OK || !pmkid.valid) {
-        snprintf(out, outsz, "{"error":"no_pmkid"}");
-        return ESP_ERR_NOT_FOUND;
-    }
-    snprintf(out, outsz,
-        "{"ap_bssid":"" MACSTR "","pmkid":""
-        , MAC2STR(pmkid.ap_bssid));
-    for (int i = 0; i < 16 && i < (int)outsz - 8; i++) {
-        int n = strlen(out);
-        snprintf(out + n, outsz - n, "%02x", pmkid.pmkid[i]);
-    }
-    int n = strlen(out);
-    snprintf(out + n, outsz - n, ""}");
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_sae(const char *method, const char *params_json,
-                                   char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    off_sae_timing_t t;
-    offensive_get_sae_timing(&t);
-    snprintf(out, outsz,
-        "{"delta_ms":%" PRIu32 ","ap_bssid":"" MACSTR ""}",
-        t.delta_us, MAC2STR(t.ap_bssid));
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_dragonfly(const char *method, const char *params_json,
-                                         char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    off_dragonfly_t d;
-    if (offensive_get_dragonfly(&d) != ESP_OK || !d.valid) {
-        snprintf(out, outsz, "{"error":"no_dragonfly"}");
-        return ESP_ERR_NOT_FOUND;
-    }
-    snprintf(out, outsz,
-        "{"ap_bssid":"" MACSTR "","ssid":"%s"}",
-        MAC2STR(d.ap_bssid), d.ssid);
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_ft(const char *method, const char *params_json,
-                                  char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    off_ft_t ft;
-    if (offensive_get_ft(&ft) != ESP_OK || !ft.valid) {
-        snprintf(out, outsz, "{"error":"no_ft"}");
-        return ESP_ERR_NOT_FOUND;
-    }
-    snprintf(out, outsz,
-        "{"ap_bssid":"" MACSTR "","sta_mac":"" MACSTR "","
-        ""reassoc_ms":%" PRIu32 "}",
-        MAC2STR(ft.ap_bssid), MAC2STR(ft.sta_mac), ft.reassoc_time_us);
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_11k(const char *method, const char *params_json,
-                                   char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    off_11k_t k;
-    offensive_get_11k(&k);
-    snprintf(out, outsz,
-        "{"target_bssid":"" MACSTR "","neighbor_bssid":"" MACSTR "","
-        ""channel":%d}",
-        MAC2STR(k.target_bssid), MAC2STR(k.neighbor_bssid), k.channel);
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_11v(const char *method, const char *params_json,
-                                   char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    off_11v_t v;
-    offensive_get_11v(&v);
-    snprintf(out, outsz,
-        "{"ap_bssid":"" MACSTR "","target_bssid":"" MACSTR "","
-        ""disassoc_timer":%d}",
-        MAC2STR(v.ap_bssid), MAC2STR(v.target_bssid), v.disassoc_timer);
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_wps(const char *method, const char *params_json,
-                                   char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    off_wps_t w;
-    if (offensive_get_wps(&w) != ESP_OK || !w.valid) {
-        snprintf(out, outsz, "{"error":"no_wps"}");
-        return ESP_ERR_NOT_FOUND;
-    }
-    snprintf(out, outsz,
-        "{"ap_bssid":"" MACSTR "","m1_len":%d}",
-        MAC2STR(w.ap_bssid), w.m1_len);
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_eap(const char *method, const char *params_json,
-                                   char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    off_eap_t e;
-    offensive_get_eap(&e);
-    snprintf(out, outsz,
-        "{"ap_bssid":"" MACSTR "","sta_mac":"" MACSTR "","
-        ""bytes":%d}",
-        MAC2STR(e.ap_bssid), MAC2STR(e.sta_mac), e.challenge_len);
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_json(const char *method, const char *params_json,
-                                    char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    offensive_json(out, outsz);
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_status(const char *method, const char *params_json,
-                                      char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    snprintf(out, outsz, "{"enabled":%s}", offensive_get_mode() ? "true" : "false");
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_clear(const char *method, const char *params_json,
-                                     char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
-    offensive_deinit();
-    snprintf(out, outsz, "{"status":"cleared"}");
-    return ESP_OK;
-}
-
-static esp_err_t rpc_export_stats(const char *method, const char *params_json,
-                                    char *out, size_t out_sz, void *user_ctx)
+                                         char *out, size_t outsz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-    char buf[256];
-    esp_err_t rc = export_json(buf, sizeof(buf));
-    if (rc != ESP_OK) {
-        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
-                                  "export stats failed", out, out_sz);
-    }
-    return jsonrpc_send_result(-1, buf, out, out_sz);
-}
-
-/* ============================================================================
- *  OFFENSIVE RESEARCH RPC METHODS
- * ============================================================================ */
-static esp_err_t rpc_offensive_set_mode(const char *method, const char *params_json,
-                                         char *out, size_t outsz)
-{
-    (void)method;
-    uint32_t mask = 0;
-    if (params_json && strlen(params_json) > 0) {
-        char *end = NULL;
-        mask = (uint32_t)strtoul(params_json, &end, 0);
-    }
-    offensive_set_mode(mask);
-    snprintf(out, outsz, "{\"mode\":\"0x%08" PRIx32 "\"}", offensive_get_mode());
-    return ESP_OK;
-}
-
-static esp_err_t rpc_offensive_get_mode(const char *method, const char *params_json,
-                                         char *out, size_t outsz)
-{
-    (void)method; (void)params_json;
     snprintf(out, outsz, "{\"mode\":\"0x%08" PRIx32 "\"}", offensive_get_mode());
     return ESP_OK;
 }
 
 static esp_err_t rpc_offensive_pmkid(const char *method, const char *params_json,
-                                     char *out, size_t outsz)
+                                     char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     off_pmkid_t pmkid;
     if (offensive_get_pmkid(&pmkid) != ESP_OK || !pmkid.valid) {
         snprintf(out, outsz, "{\"error\":\"no_pmkid\"}");
@@ -1883,9 +1718,9 @@ static esp_err_t rpc_offensive_pmkid(const char *method, const char *params_json
 }
 
 static esp_err_t rpc_offensive_sae(const char *method, const char *params_json,
-                                   char *out, size_t outsz)
+                                   char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     off_sae_timing_t t;
     offensive_get_sae_timing(&t);
     snprintf(out, outsz,
@@ -1895,9 +1730,9 @@ static esp_err_t rpc_offensive_sae(const char *method, const char *params_json,
 }
 
 static esp_err_t rpc_offensive_dragonfly(const char *method, const char *params_json,
-                                         char *out, size_t outsz)
+                                         char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     off_dragonfly_t d;
     if (offensive_get_dragonfly(&d) != ESP_OK || !d.valid) {
         snprintf(out, outsz, "{\"error\":\"no_dragonfly\"}");
@@ -1910,9 +1745,9 @@ static esp_err_t rpc_offensive_dragonfly(const char *method, const char *params_
 }
 
 static esp_err_t rpc_offensive_ft(const char *method, const char *params_json,
-                                  char *out, size_t outsz)
+                                  char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     off_ft_t ft;
     if (offensive_get_ft(&ft) != ESP_OK || !ft.valid) {
         snprintf(out, outsz, "{\"error\":\"no_ft\"}");
@@ -1926,9 +1761,9 @@ static esp_err_t rpc_offensive_ft(const char *method, const char *params_json,
 }
 
 static esp_err_t rpc_offensive_11k(const char *method, const char *params_json,
-                                   char *out, size_t outsz)
+                                   char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     off_11k_t k;
     offensive_get_11k(&k);
     snprintf(out, outsz,
@@ -1939,9 +1774,9 @@ static esp_err_t rpc_offensive_11k(const char *method, const char *params_json,
 }
 
 static esp_err_t rpc_offensive_11v(const char *method, const char *params_json,
-                                   char *out, size_t outsz)
+                                   char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     off_11v_t v;
     offensive_get_11v(&v);
     snprintf(out, outsz,
@@ -1952,9 +1787,9 @@ static esp_err_t rpc_offensive_11v(const char *method, const char *params_json,
 }
 
 static esp_err_t rpc_offensive_wps(const char *method, const char *params_json,
-                                   char *out, size_t outsz)
+                                   char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     off_wps_t w;
     if (offensive_get_wps(&w) != ESP_OK || !w.valid) {
         snprintf(out, outsz, "{\"error\":\"no_wps\"}");
@@ -1967,9 +1802,9 @@ static esp_err_t rpc_offensive_wps(const char *method, const char *params_json,
 }
 
 static esp_err_t rpc_offensive_eap(const char *method, const char *params_json,
-                                   char *out, size_t outsz)
+                                   char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     off_eap_t e;
     offensive_get_eap(&e);
     snprintf(out, outsz,
@@ -1980,83 +1815,28 @@ static esp_err_t rpc_offensive_eap(const char *method, const char *params_json,
 }
 
 static esp_err_t rpc_offensive_json(const char *method, const char *params_json,
-                                    char *out, size_t outsz)
+                                    char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     offensive_json(out, outsz);
     return ESP_OK;
 }
 
 static esp_err_t rpc_offensive_status(const char *method, const char *params_json,
-                                      char *out, size_t outsz)
+                                      char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     snprintf(out, outsz, "{\"enabled\":%s}", offensive_get_mode() ? "true" : "false");
     return ESP_OK;
 }
 
 static esp_err_t rpc_offensive_clear(const char *method, const char *params_json,
-                                     char *out, size_t outsz)
+                                     char *out, size_t outsz, void *user_ctx)
 {
-    (void)method; (void)params_json;
+    (void)method; (void)params_json; (void)user_ctx;
     offensive_deinit();
     snprintf(out, outsz, "{\"status\":\"cleared\"}");
     return ESP_OK;
-}
-
-/*============================================================================*/
-static esp_err_t rpc_export_start(const char *method, const char *params_json,
-                                 char *out, size_t out_sz, void *user_ctx)
-{
-    (void)method; (void)user_ctx;
-    cJSON *root = cJSON_Parse(params_json);
-    if (root == NULL) {
-        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
-                                  "invalid JSON", out, out_sz);
-    }
-    cJSON *mode_item = cJSON_GetObjectItem(root, "mode");
-    if (mode_item == NULL || !cJSON_IsString(mode_item)) {
-        cJSON_Delete(root);
-        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
-                                  "missing mode", out, out_sz);
-    }
-    const char *mode_str = cJSON_GetStringValue(mode_item);
-    export_mode_t mode = EXPORT_MODE_OFF;
-    if (strcmp(mode_str, "pcap") == 0) mode = EXPORT_MODE_PCAP;
-    else if (strcmp(mode_str, "pcapng") == 0) mode = EXPORT_MODE_PCAP_NG;
-    else if (strcmp(mode_str, "netxml") == 0) mode = EXPORT_MODE_NETXML;
-    else if (strcmp(mode_str, "csv") == 0) mode = EXPORT_MODE_CSV;
-    else if (strcmp(mode_str, "jsonl") == 0) mode = EXPORT_MODE_JSONL;
-    else if (strcmp(mode_str, "zstd") == 0) mode = EXPORT_MODE_ZST;
-    else {
-        cJSON_Delete(root);
-        return jsonrpc_send_error(-1, JSONRPC_CODE_INVALID_PARAMS,
-                                  "mode must be pcap|pcapng|netxml|csv|jsonl|zstd", out, out_sz);
-    }
-    cJSON *path_item = cJSON_GetObjectItem(root, "path");
-    const char *path = "/sd/export.pcap";
-    if (path_item != NULL && cJSON_IsString(path_item)) {
-        path = cJSON_GetStringValue(path_item);
-    }
-    cJSON_Delete(root);
-    esp_err_t rc = export_start(mode, path);
-    if (rc != ESP_OK) {
-        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
-                                  "export start failed", out, out_sz);
-    }
-    return jsonrpc_send_result(-1, "\"started\"", out, out_sz);
-}
-
-static esp_err_t rpc_export_stop(const char *method, const char *params_json,
-                                    char *out, size_t out_sz, void *user_ctx)
-{
-    (void)method; (void)params_json; (void)user_ctx;
-    esp_err_t rc = export_stop();
-    if (rc != ESP_OK) {
-        return jsonrpc_send_error(-1, JSONRPC_CODE_INTERNAL_ERROR,
-                                  "export stop failed", out, out_sz);
-    }
-    return jsonrpc_send_result(-1, "\"stopped\"", out, out_sz);
 }
 
 static esp_err_t rpc_export_stats(const char *method, const char *params_json,
@@ -2119,8 +1899,8 @@ static esp_err_t rpc_system_health(const char *method, const char *params_json,
     snprintf(json, sizeof(json),
         "{\"uptime_s\":%u,\"free_heap\":%u,\"free_psram\":%u,"
         "\"cpu_temp_c\":%.2f,\"min_free_heap\":%u}",
-        m.uptime_s, m.free_heap, m.free_psram,
-        (float)m.cpu_temp_c / 100.0f, m.min_free_heap);
+        (unsigned)m.uptime_s, (unsigned)m.free_heap, (unsigned)m.free_psram,
+        (float)m.cpu_temp_c / 100.0f, (unsigned)m.min_free_heap);
     return jsonrpc_send_result(-1, json, out, out_sz);
 }
 
@@ -2148,7 +1928,7 @@ static esp_err_t rpc_wifi_start(const char *method, const char *params_json,
                                 char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-    wifi_sniffer_start();
+    wifi_sniffer_start(0);
     return jsonrpc_send_result(-1, "\"started\"", out, out_sz);
 }
 
@@ -2327,7 +2107,7 @@ static esp_err_t rpc_thread_stop(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-    esp_err_t rc = thread_br_stop();
+    (void)thread_br_stop();
     return jsonrpc_send_result(-1, "{\"status\":\"stopped\"}", out, out_sz);
 }
 
@@ -2353,7 +2133,7 @@ static esp_err_t rpc_matter_stop(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-    esp_err_t rc = matter_commissioner_stop();
+    (void)matter_commissioner_stop();
     return jsonrpc_send_result(-1, "{\"status\":\"stopped\"}", out, out_sz);
 }
 
@@ -2379,7 +2159,7 @@ static esp_err_t rpc_zigbee_stop(const char *method, const char *params_json,
                                  char *out, size_t out_sz, void *user_ctx)
 {
     (void)method; (void)params_json; (void)user_ctx;
-    esp_err_t rc = zigbee_sniffer_stop();
+    (void)zigbee_sniffer_stop();
     return jsonrpc_send_result(-1, "{\"status\":\"stopped\"}", out, out_sz);
 }
 
@@ -2477,10 +2257,11 @@ static esp_err_t rpc_ota_start(const char *method, const char *params_json,
         cJSON_Delete(p);
         return jsonrpc_send_error(-1, -32600, "url required", out, out_sz);
     }
-    const char *url = cJSON_GetStringValue(jurl);
+    char url_buf[256] = {0};
+    snprintf(url_buf, sizeof(url_buf), "%s", cJSON_GetStringValue(jurl));
     cJSON_Delete(p);
-    esp_err_t rc = ota_http_start(url);
-    if (rc != ESP_OK) return rc;
+    ota_status_t st = ota_http_start(url_buf, NULL, 0);
+    if (st != OTA_OK) return ESP_FAIL;
     return jsonrpc_send_result(-1, "\"started\"", out, out_sz);
 }
 
@@ -2498,7 +2279,7 @@ static esp_err_t rpc_ota_progress(const char *method, const char *params_json,
 /*============================================================================*/
 static uint16_t build_system_methods(jsonrpc_method_entry_t *table, uint16_t cap)
 {
-    if (cap < 60) return 0;
+    if (cap < 83) return 0;
     table[0].name = "system.ping";      table[0].fn = rpc_system_ping;      table[0].user_ctx = NULL;
     table[1].name = "system.info";      table[1].fn = rpc_system_info;      table[1].user_ctx = NULL;
     table[2].name = "system.caps";      table[2].fn = rpc_system_caps;      table[2].user_ctx = NULL;
@@ -2659,6 +2440,17 @@ static uint16_t build_ota_methods(jsonrpc_method_entry_t *table, uint16_t cap)
     table[0].name = "ota.start";      table[0].fn = rpc_ota_start;      table[0].user_ctx = NULL;
     table[1].name = "ota.progress";   table[1].fn = rpc_ota_progress;   table[1].user_ctx = NULL;
     return 2;
+}
+
+/* ============================================================================
+ *  Stub for platform methods (not yet implemented)
+ * ============================================================================ */
+
+static uint16_t build_platform_methods(jsonrpc_method_entry_t *table, uint16_t cap)
+{
+    (void)table; (void)cap;
+    /* Platform methods not yet implemented */
+    return 0;
 }
 
 /*============================================================================*/

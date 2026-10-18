@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -43,6 +44,9 @@ typedef struct {
     uint32_t best_idx;
     float best_score;
 } planner_stats_t;
+
+/* Initialize attack planner. */
+const char *attack_step_name(attack_step_t step);
 
 /* Initialize attack planner. */
 esp_err_t attack_planner_init(void);

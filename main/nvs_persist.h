@@ -12,6 +12,7 @@ extern "C" {
 #endif
 
 esp_err_t persist_init(void);
+static inline esp_err_t nvs_persist_init(void) { return persist_init(); }
 
 /* Simple settings */
 esp_err_t persist_set_u32(const char *key, uint32_t value);

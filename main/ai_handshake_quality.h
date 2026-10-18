@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "esp_err.h"
 
@@ -31,6 +32,8 @@ typedef struct {
     bool     has_mic;
     bool     has_pmkid;
     bool     complete;      /* valid capture present */
+    bool     model_loaded;
+    uint32_t inference_us;
 } ai_hs_quality_t;
 
 /**
