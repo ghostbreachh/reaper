@@ -25,7 +25,7 @@ struct ble_gap_event {
     struct { uint16_t value; } mtu;
 };
 struct ble_gap_conn_params {
-    uint16_t scan_interval;
+    uint16_t scan_itvl;
     uint16_t scan_window;
     uint16_t itvl_min;
     uint16_t itvl_max;
@@ -175,7 +175,7 @@ static int gattc_event_handler(struct ble_gap_event *event, void *arg)
     return 0;
 }
 
-esp_err_t ble_gattc_init(void)
+esp_err_t app_ble_gattc_init(void)
 {
     gattc_lock_init();
     memset(g_conns, 0, sizeof(g_conns));
@@ -211,7 +211,7 @@ esp_err_t ble_gattc_connect(const uint8_t *mac, uint32_t timeout_ms,
 
     struct ble_gap_conn_params conn_params;
     memset(&conn_params, 0, sizeof(conn_params));
-    conn_params.scan_interval = 0x0010;
+    conn_params.scan_itvl = 0x0010;
     conn_params.scan_window = 0x0010;
     conn_params.itvl_min = 0x0018;
     conn_params.itvl_max = 0x0028;

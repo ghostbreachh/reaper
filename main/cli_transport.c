@@ -38,9 +38,6 @@ static SemaphoreHandle_t g_transport_lock = NULL;
 
 static esp_err_t uart0_init(void)
 {
-    /* 
-     * CRITICAL FIX: Set STDIN to non-blocking so read() doesn't freeze the task.
-     */
     int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
     if (flags != -1) {
         fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
@@ -55,9 +52,10 @@ static bool uart0_connected(void) { return true; }
 
 static int uart0_read_line(char *buf, size_t cap, uint32_t timeout_ms)
 {
-    if (cap == 0) return -1;
-    size_t i = 0;
-    bool got_any = false;
+    if (cap == 0 || buf == NULL) return -1;
+    
+    static char s_line_buf[CLI_LINE_MAX];
+    static size_t s_line_idx = 0;
     
     TickType_t start_tick = xTaskGetTickCount();
     TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
@@ -70,17 +68,21 @@ static int uart0_read_line(char *buf, size_t cap, uint32_t timeout_ms)
             start_tick = xTaskGetTickCount(); 
             
             if (c == '\r' || c == '\n') {
-                if (!got_any) continue;
-                buf[i] = '\0';
+                s_line_buf[s_line_idx] = '\0';
                 write(STDOUT_FILENO, "\r\n", 2);
-                return (int)i;
+                
+                size_t out_len = (s_line_idx < cap) ? s_line_idx : (cap - 1);
+                memcpy(buf, s_line_buf, out_len);
+                buf[out_len] = '\0';
+                
+                int ret_len = (int)s_line_idx;
+                s_line_idx = 0;
+                return ret_len;
             }
 
-            got_any = true;
-
-            if (c == 0x08 || c == 0x7F) { 
-                if (i > 0) {
-                    i--;
+            if (c == 0x08 || c == 0x7F) { /* Backspace / DEL */
+                if (s_line_idx > 0) {
+                    s_line_idx--;
                     write(STDOUT_FILENO, "\b \b", 3);
                 }
                 continue;
@@ -88,14 +90,13 @@ static int uart0_read_line(char *buf, size_t cap, uint32_t timeout_ms)
 
             if (c < 0x20) continue; 
 
-            if (i < cap - 1) {
-                buf[i++] = (char)c;
-                write(STDOUT_FILENO, &c, 1); 
+            if (s_line_idx < sizeof(s_line_buf) - 1 && s_line_idx < cap - 1) {
+                s_line_buf[s_line_idx++] = (char)c;
+                write(STDOUT_FILENO, &c, 1); /* Echo */
             }
         } else {
-            /* read() returns -1 with EAGAIN when no data is available in O_NONBLOCK */
             if ((xTaskGetTickCount() - start_tick) >= timeout_ticks) {
-                return (i > 0) ? (int)i : -1;
+                return -1; /* Timeout waiting for line completion */
             }
             vTaskDelay(pdMS_TO_TICKS(10)); 
         }
@@ -143,8 +144,10 @@ static bool cdc_connected(void)
 static int cdc_read_line(char *buf, size_t cap, uint32_t timeout_ms)
 {
 #if REAPER_HAS_TUSB_CDC
-    if (cap == 0) return -1;
-    size_t i = 0;
+    if (cap == 0 || buf == NULL) return -1;
+    
+    static char s_cdc_buf[CLI_LINE_MAX];
+    static size_t s_cdc_idx = 0;
     
     TickType_t start_tick = xTaskGetTickCount();
     TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
@@ -157,15 +160,22 @@ static int cdc_read_line(char *buf, size_t cap, uint32_t timeout_ms)
                 start_tick = xTaskGetTickCount(); 
                 
                 if (c == '\r' || c == '\n') {
-                    buf[i] = '\0';
+                    s_cdc_buf[s_cdc_idx] = '\0';
                     tud_cdc_write("\r\n", 2);
                     tud_cdc_write_flush();
-                    return (int)i;
+                    
+                    size_t out_len = (s_cdc_idx < cap) ? s_cdc_idx : (cap - 1);
+                    memcpy(buf, s_cdc_buf, out_len);
+                    buf[out_len] = '\0';
+                    
+                    int ret_len = (int)s_cdc_idx;
+                    s_cdc_idx = 0;
+                    return ret_len;
                 }
 
                 if (c == 0x08 || c == 0x7F) {
-                    if (i > 0) {
-                        i--;
+                    if (s_cdc_idx > 0) {
+                        s_cdc_idx--;
                         tud_cdc_write("\b \b", 3);
                         tud_cdc_write_flush();
                     }
@@ -174,20 +184,21 @@ static int cdc_read_line(char *buf, size_t cap, uint32_t timeout_ms)
 
                 if (c < 0x20) continue;
 
-                if (i < cap - 1) {
-                    buf[i++] = (char)c;
+                if (s_cdc_idx < sizeof(s_cdc_buf) - 1 && s_cdc_idx < cap - 1) {
+                    s_cdc_buf[s_cdc_idx++] = (char)c;
                     tud_cdc_write(&c, 1); /* Echo */
                     tud_cdc_write_flush();
                 }
             }
         } else {
             if ((xTaskGetTickCount() - start_tick) >= timeout_ticks) {
-                return (i > 0) ? (int)i : -1;
+                return -1;
             }
             vTaskDelay(pdMS_TO_TICKS(10)); 
         }
     }
 #else
+    (void)buf; (void)cap; (void)timeout_ms;
     return -1;
 #endif
 }
@@ -250,7 +261,6 @@ esp_err_t cli_transport_switch(port_transport_t new_transport)
     return ret;
 }
 
-/* Safe tokenizer to prevent memory corruption in cli_dispatch_command */
 static int tokenize_line(char *line, char **argv, int max_args)
 {
     int argc = 0;
@@ -269,10 +279,12 @@ static void cli_command_loop(void)
 {
     char line[CLI_LINE_MAX];
     char *argv[CLI_MAX_ARGS];
+    bool need_prompt = true;
 
     while (1) {
         if (usb_cdc_break_signaled()) {
             usb_cdc_break_clear();
+            need_prompt = true;
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
@@ -282,20 +294,36 @@ static void cli_command_loop(void)
         xSemaphoreGive(g_transport_lock);
 
         if (!t || !t->connected()) {
+            need_prompt = true;
             vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 
-        if (t == &g_uart0_transport) {
+        if (need_prompt && t == &g_uart0_transport) {
             t->printf("\033[36mtoolkit> \033[0m"); 
+            need_prompt = false;
         }
 
-        int rc = t->read_line(line, sizeof(line), 500);
-        if (rc <= 0) continue;
+        int rc = t->read_line(line, sizeof(line), 100);
+        if (rc < 0) {
+            /* Timeout: user still typing or idle — do NOT reprint prompt */
+            continue;
+        }
+
+        if (rc == 0) {
+            /* User pressed Enter on an empty line */
+            need_prompt = true;
+            continue;
+        }
 
         char *p = line;
         while (isspace((unsigned char)*p)) p++;
         
+        if (*p == '\0') {
+            need_prompt = true;
+            continue;
+        }
+
         if (*p == '{') {
             jsonrpc_handle_message(p); 
         } else {
@@ -304,6 +332,7 @@ static void cli_command_loop(void)
                 cli_dispatch_command(argc, argv);
             }
         }
+        need_prompt = true;
     }
 }
 
@@ -320,7 +349,6 @@ esp_err_t cli_start(void)
         if (!g_transport_lock) return ESP_ERR_NO_MEM;
     }
 
-    /* Use the global boot detection result */
     port_transport_t desired = g_boot_port.active; 
 
     esp_err_t ret = cli_transport_switch(desired);

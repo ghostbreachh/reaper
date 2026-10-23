@@ -49,8 +49,8 @@ typedef void (*ble_gattc_disc_char_fn)(ble_gattc_conn_t conn_handle,
                                        const ble_gattc_char_t *chr, void *arg);
 
 /* Initialize GATT client subsystem. Call once at startup. */
-esp_err_t ble_gattc_init(void);
-static inline esp_err_t ble_gatt_client_init(void) { return ble_gattc_init(); }
+esp_err_t app_ble_gattc_init(void);
+static inline esp_err_t app_ble_gatt_client_init(void) { return app_ble_gattc_init(); }
 
 /* Initiate connection to a peripheral by MAC.
  * mac: 6-byte BLE address

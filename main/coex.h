@@ -29,7 +29,7 @@ typedef struct {
  * Registers the ESP-IDF coexistence adapter and sets initial preference.
  * Must be called BEFORE esp_wifi_init() and esp_bt_controller_enable().
  */
-esp_err_t coex_init(void);
+esp_err_t reaper_coex_init(void);
 
 /**
  * @brief Set airtime preference between WiFi and BLE.

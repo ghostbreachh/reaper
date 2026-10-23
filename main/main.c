@@ -217,42 +217,28 @@ static void print_banner(void)
         return;
     }
 
-    /* Clear screen for clean boot look. */
-    printf("\033[2J\033[H");
+    /* Clear screen and place cursor at top */
+    printf("\033[2J\033[H\n");
 
-    puts("");
-
-    printf(UI_CYAN
-        "  ╔══════════════════════════════════════════════════════════════════╗\n"
-        "  ║                                                                  ║\n"
-    UI_RESET);
-
-    printf(UI_CYAN "  ║  " UI_RESET UI_YELLOW UI_BOLD
-        "   W . L . A . B   ·   W I R E L E S S   L A B   T K   "
-    UI_RESET UI_CYAN "  ║\n" UI_RESET);
-
-    printf(UI_CYAN "  ║  " UI_RESET UI_GRAY
-        "                  E S P 3 2 - S 3  ·  N 1 6 R 8              "
-    UI_RESET UI_CYAN "  ║\n" UI_RESET);
+    printf(UI_RED UI_BOLD
+        "  ██████╗ ███████╗ █████╗ ██████╗ ███████╗██████╗ \n"
+        "  ██╔══██╗██╔════╝██╔══██╗██╔══██╗██╔════╝██╔══██╗\n"
+        "  ██████╔╝█████╗  ███████║██████╔╝█████╗  ██████╔╝\n"
+        "  ██╔══██╗██╔══╝  ██╔══██║██╔═══╝ ██╔══╝  ██╔══██╗\n"
+        "  ██║  ██║███████╗██║  ██║██║     ███████╗██║  ██║\n"
+        "  ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝\n"
+        UI_RESET);
 
     printf(UI_CYAN
-        "  ║                                                                  ║\n"
-        "  ╠══════════════════════════════════════════════════════════════════╣\n"
-    UI_RESET);
-
-    printf(UI_CYAN "  ║  " UI_RESET UI_GRAY
-        "  802.11bgn Sniffer  ·  BLE 5.0  ·  ARP MITM  ·  WPA2 Crack    "
-    UI_RESET UI_CYAN "║\n" UI_RESET);
-
-    printf(UI_CYAN "  ║  " UI_RESET UI_GRAY
-        "  PCAP Ring  ·  Deauth  ·  Evil Portal  ·  Cred Sniffer         "
-    UI_RESET UI_CYAN "║\n" UI_RESET);
-
-    printf(UI_CYAN
-        "  ╚══════════════════════════════════════════════════════════════════╝\n"
-    UI_RESET);
-
-    puts("");
+        "  ┌──────────────────────────────────────────────────────────────────┐\n"
+        "  │ " UI_WHITE UI_BOLD "⚡ REAPER · ESP32-S3 WIRELESS RESEARCH & AUDIT TOOLKIT ⚡" UI_CYAN "       │\n"
+        "  │ " UI_GRAY "Hardware: N16R8 (16MB Flash · 8MB OPI PSRAM) · Dual 240MHz" UI_CYAN "        │\n"
+        "  ├──────────────────────────────────────────────────────────────────┤\n"
+        "  │ " UI_GREEN "▸ 802.11bgn Sniff & Inject" UI_GRAY "   │ " UI_MAGENTA "▸ WPA2/WPA3 PMKID & Handshake" UI_CYAN "      │\n"
+        "  │ " UI_YELLOW "▸ BLE 5.0 Coded PHY / Ext" UI_GRAY "   │ " UI_CYAN "▸ MITM · Evil Portal · Rogue AP" UI_CYAN "       │\n"
+        "  │ " UI_RED "▸ Hardware Deauth Engine" UI_GRAY "    │ " UI_WHITE "▸ AI Anomaly & Threat Predictor" UI_CYAN "      │\n"
+        "  └──────────────────────────────────────────────────────────────────┘\n"
+        UI_RESET "\n");
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -420,18 +406,18 @@ static void run_init_sequence(void)
     BOOT_INIT("Channel Hopper", channel_hopper_init(), false);
 
     /* Wi-Fi core */
-    BOOT_INIT("Wi-Fi Coexistence", coex_init(), false);
+    BOOT_INIT("Wi-Fi Coexistence", reaper_coex_init(), false);
     BOOT_INIT("Wi-Fi Sniffer", wifi_sniffer_init(), false);
 
     /* BLE core */
-    BOOT_INIT("BLE 5.0 Scanner (NimBLE host)", ble_scanner_init(), false);
+    BOOT_INIT("BLE 5.0 Scanner (NimBLE host)", ble_scanner_init(), true);
     
     /* BLE submodules (explicit initialization) */
     BOOT_INIT("BLE Extended Advertising", ble_ext_adv_init(), true);
     BOOT_INIT("BLE Periodic Advertising", ble_periodic_init(), true);
     BOOT_INIT("BLE PHY Detection", ble_phy_init(), true);
     BOOT_INIT("BLE ISO/BIG", ble_iso_init(), true);
-    BOOT_INIT("BLE GATT Client", ble_gatt_client_init(), true);
+    BOOT_INIT("BLE GATT Client", app_ble_gatt_client_init(), true);
     BOOT_INIT("BLE GATT Enumerator", ble_gatt_enumerator_init(), true);
     BOOT_INIT("BLE MITM", ble_mitm_init(), true);
     BOOT_INIT("BLE RPA Bypass", ble_rpa_bypass_init(), true);

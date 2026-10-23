@@ -52,7 +52,7 @@ static esp_coex_prefer_t map_to_idf_pref(coex_pref_t pref)
  *  Public API
  * ----------------------------------------------------------------------- */
 
-esp_err_t coex_init(void)
+esp_err_t reaper_coex_init(void)
 {
     if (atomic_load(&g_init_done)) return ESP_OK;
 
